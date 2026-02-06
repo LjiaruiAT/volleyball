@@ -18,6 +18,7 @@
 #include "PID_old.h"
 #include "math.h"
 #include "motor.h"
+#include "motorEx.h"
 #define Remote_BT_0_WIFI_1 1
 
 #if !Remote_BT_0_WIFI_1

@@ -31,13 +31,13 @@ rm3508.vel_pid_3508.Ki =0.0f;
 rm3508.vel_pid_3508.Kd =0.0f;
 rm3508.vel_pid_3508.limit =500.0f;
 rm3508.vel_pid_3508.output_limit = 10000.0f;
-	TickType_t Last_wake_time = xTaskGetTickCount();
+TickType_t Last_wake_time = xTaskGetTickCount();
 	for(;;)
 	{
-	PID_Control2(rm3508.motor_3508.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
-    PID_Control2(rm3508.motor_3508.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
+	PID_Control2(rm3508.motor_3508.motor.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
+    PID_Control2(rm3508.motor_3508.motor.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
     can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;
-    MotorSend(&hcan1,0x200,can_send_buf[0]);
+    MotorSend(&hcan1,0x200,can_send_buf);
     HAL_Delay(500);
 	GoMotorSend(&let_fly.go_volleyball,let_fly.exp.exp_tor,let_fly.exp.exp_vel,let_fly.exp.exp_pos,let_fly.exp.exp_kp,let_fly.exp.exp_kd);
 	vTaskDelayUntil(&Last_wake_time, pdMS_TO_TICKS(2));
@@ -104,14 +104,14 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         }
         
         if (isrflags & USART_SR_PE) {
-            // ��żУ�����ֻ���SR�������
+
             volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
             error_stats.parity++;
         }
         
-        // �����ܴ������
+
         error_stats.total++;
-        error_cnt = error_stats.total; // ������ԭ�����ļ�����
+        error_cnt = error_stats.total; 
         
         last_error_time = now;
         
@@ -125,7 +125,7 @@ uint8_t buf[8];
     if (hcan->Instance == CAN1)
     {
         uint32_t id = CAN_Receive_DataFrame(hcan, buf);
-        Motor3508Recv(&rm3508, hcan, id, buf);
+        Motor3508Recv(&rm3508.motor_3508, hcan, id, buf);
 }
 }
 
