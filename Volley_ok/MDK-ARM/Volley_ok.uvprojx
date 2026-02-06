@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;..\MDK-ARM;..\lib</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;..\MDK-ARM;..\lib;..\Mytask</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -600,34 +600,34 @@
           <GroupName>MyTask</GroupName>
           <Files>
             <File>
-              <FileName>Task_Init.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\Task_Init.c</FilePath>
-            </File>
-            <File>
-              <FileName>Task_Init.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>.\Task_Init.h</FilePath>
-            </File>
-            <File>
               <FileName>Chassis.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\Chassis.c</FilePath>
+              <FilePath>..\Mytask\Chassis.c</FilePath>
             </File>
             <File>
               <FileName>Chassis.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\Chassis.h</FilePath>
+              <FilePath>..\Mytask\Chassis.h</FilePath>
             </File>
             <File>
               <FileName>hit_ball.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\hit_ball.c</FilePath>
+              <FilePath>..\Mytask\hit_ball.c</FilePath>
             </File>
             <File>
               <FileName>hit_ball.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\hit_ball.h</FilePath>
+              <FilePath>..\Mytask\hit_ball.h</FilePath>
+            </File>
+            <File>
+              <FileName>Task_Init.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Mytask\Task_Init.c</FilePath>
+            </File>
+            <File>
+              <FileName>Task_Init.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Mytask\Task_Init.h</FilePath>
             </File>
           </Files>
         </Group>

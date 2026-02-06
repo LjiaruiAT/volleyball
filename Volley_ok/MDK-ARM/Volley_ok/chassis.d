@@ -1,6 +1,6 @@
-volley_ok\chassis.o: Chassis.c
-volley_ok\chassis.o: Chassis.h
-volley_ok\chassis.o: Task_Init.h
+volley_ok\chassis.o: ..\Mytask\Chassis.c
+volley_ok\chassis.o: ..\Mytask\Chassis.h
+volley_ok\chassis.o: ..\Mytask\Task_Init.h
 volley_ok\chassis.o: ..\lib\RMLibHead.h
 volley_ok\chassis.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h
 volley_ok\chassis.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
@@ -53,11 +53,11 @@ volley_ok\chassis.o: ../Core/Inc/can.h
 volley_ok\chassis.o: ..\lib\RobStride2.h
 volley_ok\chassis.o: ../Core/Inc/usart.h
 volley_ok\chassis.o: ..\lib\bsp_dwt.h
-volley_ok\chassis.o: Chassis.h
+volley_ok\chassis.o: ..\Mytask\Chassis.h
 volley_ok\chassis.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\math.h
-volley_ok\chassis.o: hit_ball.h
-volley_ok\chassis.o: Task_Init.h
+volley_ok\chassis.o: ..\Mytask\hit_ball.h
+volley_ok\chassis.o: ..\Mytask\Task_Init.h
 volley_ok\chassis.o: ..\lib\PID_old.h
 volley_ok\chassis.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
-volley_ok\chassis.o: step.h
+volley_ok\chassis.o: ..\MDK-ARM\step.h
 volley_ok\chassis.o: ..\lib\VESC.h

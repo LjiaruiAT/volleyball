@@ -1,4 +1,4 @@
-volley_ok\task_init.o: Task_Init.c
+volley_ok\task_init.o: ..\Mytask\Task_Init.c
 volley_ok\task_init.o: ..\lib\RMLibHead.h
 volley_ok\task_init.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h
 volley_ok\task_init.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
@@ -34,7 +34,7 @@ volley_ok\task_init.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.
 volley_ok\task_init.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h
 volley_ok\task_init.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
 volley_ok\task_init.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
-volley_ok\task_init.o: Task_Init.h
+volley_ok\task_init.o: ..\Mytask\Task_Init.h
 volley_ok\task_init.o: ../Core/Inc/main.h
 volley_ok\task_init.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h
 volley_ok\task_init.o: ../Core/Inc/FreeRTOSConfig.h
@@ -52,11 +52,11 @@ volley_ok\task_init.o: ../Core/Inc/can.h
 volley_ok\task_init.o: ..\lib\RobStride2.h
 volley_ok\task_init.o: ../Core/Inc/usart.h
 volley_ok\task_init.o: ..\lib\bsp_dwt.h
-volley_ok\task_init.o: Chassis.h
-volley_ok\task_init.o: Task_Init.h
+volley_ok\task_init.o: ..\Mytask\Chassis.h
+volley_ok\task_init.o: ..\Mytask\Task_Init.h
 volley_ok\task_init.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
 volley_ok\task_init.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\math.h
-volley_ok\task_init.o: hit_ball.h
+volley_ok\task_init.o: ..\Mytask\hit_ball.h
 volley_ok\task_init.o: ..\lib\PID_old.h
-volley_ok\task_init.o: step.h
+volley_ok\task_init.o: ..\MDK-ARM\step.h
 volley_ok\task_init.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/semphr.h

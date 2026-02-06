@@ -1,6 +1,6 @@
-volley_ok\hit_ball.o: hit_ball.c
-volley_ok\hit_ball.o: hit_ball.h
-volley_ok\hit_ball.o: Task_Init.h
+volley_ok\hit_ball.o: ..\Mytask\hit_ball.c
+volley_ok\hit_ball.o: ..\Mytask\hit_ball.h
+volley_ok\hit_ball.o: ..\Mytask\Task_Init.h
 volley_ok\hit_ball.o: ..\lib\RMLibHead.h
 volley_ok\hit_ball.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h
 volley_ok\hit_ball.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
@@ -53,10 +53,10 @@ volley_ok\hit_ball.o: ../Core/Inc/can.h
 volley_ok\hit_ball.o: ..\lib\RobStride2.h
 volley_ok\hit_ball.o: ../Core/Inc/usart.h
 volley_ok\hit_ball.o: ..\lib\bsp_dwt.h
-volley_ok\hit_ball.o: Chassis.h
-volley_ok\hit_ball.o: Task_Init.h
+volley_ok\hit_ball.o: ..\Mytask\Chassis.h
+volley_ok\hit_ball.o: ..\Mytask\Task_Init.h
 volley_ok\hit_ball.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdbool.h
 volley_ok\hit_ball.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\math.h
-volley_ok\hit_ball.o: hit_ball.h
+volley_ok\hit_ball.o: ..\Mytask\hit_ball.h
 volley_ok\hit_ball.o: ..\lib\PID_old.h
-volley_ok\hit_ball.o: step.h
+volley_ok\hit_ball.o: ..\MDK-ARM\step.h
