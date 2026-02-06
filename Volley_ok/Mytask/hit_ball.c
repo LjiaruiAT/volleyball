@@ -1,12 +1,15 @@
 #include "hit_ball.h"
-// Ìí¼Ó´íÎóÍ³¼Æ½á¹¹
+// ï¿½ï¿½ï¿½Ó´ï¿½ï¿½ï¿½Í³ï¿½Æ½á¹¹
 uint32_t error_cnt = 0;
 uint32_t last_error_time = 0;
 ErrorStats_t error_stats = {0};
 exp_param go_volley = {0};
 uint32_t err_timer_cnt = 0;
 RS485_t rs485bus;
+Rm3508 rm3508;
+exp_param exp_3508;
 QueueHandle_t cdc_recv_semphr;
+int16_t can_send_buf[4];
 push let_fly=
 {
 	.go_volleyball.motor_id = 0x01,
@@ -16,12 +19,26 @@ TaskHandle_t Hit_Task_Handle;
 
 void Hit_Task(void *pvParameters)
 {
- 
-		
+
+rm3508.pos_pid_3508.Kp =0.0f;
+rm3508.pos_pid_3508.Ki =0.0f;
+rm3508.pos_pid_3508.Kd =0.0f;
+rm3508.pos_pid_3508.limit =500.0f;
+rm3508.pos_pid_3508.output_limit = 10000.0f;
+
+rm3508.vel_pid_3508.Kp =0.0f;
+rm3508.vel_pid_3508.Ki =0.0f;
+rm3508.vel_pid_3508.Kd =0.0f;
+rm3508.vel_pid_3508.limit =500.0f;
+rm3508.vel_pid_3508.output_limit = 10000.0f;
 	TickType_t Last_wake_time = xTaskGetTickCount();
 	for(;;)
 	{
-		
+	PID_Control2(rm3508.motor_3508.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
+    PID_Control2(rm3508.motor_3508.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
+    can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;
+    MotorSend(&hcan1,0x200,can_send_buf[0]);
+    HAL_Delay(500);
 	GoMotorSend(&let_fly.go_volleyball,let_fly.exp.exp_tor,let_fly.exp.exp_vel,let_fly.exp.exp_pos,let_fly.exp.exp_kp,let_fly.exp.exp_kd);
 	vTaskDelayUntil(&Last_wake_time, pdMS_TO_TICKS(2));
   }
@@ -39,7 +56,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     if (huart->Instance == USART6)
     {
         RS485RecvIRQ_Handler(&rs485bus, huart, size);
-        err_timer_cnt=0;    //Ã¿½ÓÊÕÒ»´Î£¬¾ÍÇåÁã
+        err_timer_cnt=0;    //Ã¿ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     }
 }
 
@@ -49,32 +66,32 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         uint32_t now = HAL_GetTick();
         
-        // ¼ì²é´íÎóÆµÂÊ£¬µ«²»½øÐÐ¸´Î»
-        if ((now - error_stats.last_error_time) < 10) { // 10msÄÚ¶à´Î´íÎó
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµï¿½Ê£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¸ï¿½Î»
+        if ((now - error_stats.last_error_time) < 10) { // 10msï¿½Ú¶ï¿½Î´ï¿½ï¿½ï¿½
             error_stats.continuous_errors++;
         } else {
-            error_stats.continuous_errors = 0; // ÖØÖÃÁ¬Ðø´íÎó¼ÆÊý
+            error_stats.continuous_errors = 0; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         }
         error_stats.last_error_time = now;
         
-        // ÏÈÍ£Ö¹DMA´«Êä£¬±ÜÃâÔÚÇå³ý´íÎó±êÖ¾Ê±²úÉúÐÂµÄÖÐ¶Ï»ò´íÎó
+        // ï¿½ï¿½Í£Ö¹DMAï¿½ï¿½ï¿½ä£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾Ê±ï¿½ï¿½ï¿½ï¿½ï¿½Âµï¿½ï¿½Ð¶Ï»ï¿½ï¿½ï¿½ï¿½
         HAL_UART_DMAStop(huart);
         
-        // ÖØÖÃHAL×´Ì¬
+        // ï¿½ï¿½ï¿½ï¿½HAL×´Ì¬
         huart->ErrorCode = HAL_UART_ERROR_NONE;
         huart->RxState = HAL_UART_STATE_READY;
         huart->gState = HAL_UART_STATE_READY;
         
-        // È»ºóÇå³ý´íÎó±êÖ¾ - °´ÕÕSTM32F4²Î¿¼ÊÖ²áÒªÇóµÄË³Ðò
+        // È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ - ï¿½ï¿½ï¿½ï¿½STM32F4ï¿½Î¿ï¿½ï¿½Ö²ï¿½Òªï¿½ï¿½ï¿½Ë³ï¿½ï¿½
         uint32_t isrflags = READ_REG(huart->Instance->SR);
         
-        // °´Ë³Ðò´¦Àí¸÷ÖÖ´íÎó±êÖ¾£¬±ØÐëÏÈ¶ÁSRÔÙ¶ÁDRÀ´Çå³ý´íÎó
+        // ï¿½ï¿½Ë³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö´ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¶ï¿½SRï¿½Ù¶ï¿½DRï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         if (isrflags & (USART_SR_ORE | USART_SR_NE | USART_SR_FE)) {
-            // ¶ÔÓÚORE¡¢NE¡¢FE´íÎó£¬ÐèÒªÏÈ¶ÁSRÔÙ¶ÁDR
+            // ï¿½ï¿½ï¿½ï¿½OREï¿½ï¿½NEï¿½ï¿½FEï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½È¶ï¿½SRï¿½Ù¶ï¿½DR
             volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
-            volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); // Õâ¸ö¶ÁÈ¡»áÇå³ýORE¡¢NE¡¢FE
+            volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); // ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½OREï¿½ï¿½NEï¿½ï¿½FE
             
-            // Í³¼Æ¾ßÌåµÄ´íÎóÀàÐÍ
+            // Í³ï¿½Æ¾ï¿½ï¿½ï¿½Ä´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             if (isrflags & USART_SR_ORE) {
                 error_stats.overrun++;
             }
@@ -87,17 +104,28 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         }
         
         if (isrflags & USART_SR_PE) {
-            // ÆæÅ¼Ð£Ñé´íÎóÖ»Ðè¶ÁSR¼´¿ÉÇå³ý
+            // ï¿½ï¿½Å¼Ð£ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½SRï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
             error_stats.parity++;
         }
         
-        // Ôö¼Ó×Ü´íÎó¼ÆÊý
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ü´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         error_stats.total++;
-        error_cnt = error_stats.total; // ±£³ÖÓëÔ­±äÁ¿µÄ¼æÈÝÐÔ
+        error_cnt = error_stats.total; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô­ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½
         
         last_error_time = now;
         
         RS485RecvIRQ_Handler(&rs485bus, huart, 0);
     }
 }
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+uint8_t buf[8];
+    if (hcan->Instance == CAN1)
+    {
+        uint32_t id = CAN_Receive_DataFrame(hcan, buf);
+        Motor3508Recv(&rm3508, hcan, id, buf);
+}
+}
+

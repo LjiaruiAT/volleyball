@@ -39,5 +39,10 @@ typedef struct {
 //    float x;
 //    float y;
 //} Vec2;
+typedef struct {
+    RM3508_TypeDef motor_3508;
+    PID2 pos_pid_3508;
+    PID2 vel_pid_3508;
+} Rm3508;
 void Hit_Task(void *pvParameters);
 
