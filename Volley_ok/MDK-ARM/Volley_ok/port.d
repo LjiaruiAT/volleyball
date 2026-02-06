@@ -1,0 +1,12 @@
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/port.c
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h
+volley_ok\port.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
+volley_ok\port.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+volley_ok\port.o: ../Core/Inc/FreeRTOSConfig.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/projdefs.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/portable.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/deprecated_definitions.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F/portmacro.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/mpu_wrappers.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/task.h
+volley_ok\port.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h
