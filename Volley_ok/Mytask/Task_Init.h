@@ -1,6 +1,8 @@
 #ifndef _TASK_INIT_H_
 #define _TASK_INIT_H_
-
+#include "485_bus.h"
+#include "crc_ccitt.h"
+#include "go_motor.h"
 #include "RMLibHead.h"
 #include "main.h"
 #include "FreeRTOS.h"
@@ -13,7 +15,6 @@
 #include "bsp_dwt.h"
 #include "Chassis.h"
 #include "math.h"
-#include "hit_ball.h"
 #include "PID_old.h"
 #include "math.h"
 
@@ -110,5 +111,7 @@ extern ChassisMode chassis_mode;
 void Updatakey(Remote_Handle_t * xx);
 void Move_Task(void *pvParameters);
 void Task_Init(void);
+extern TaskHandle_t Hit_Task_Handle;
+extern void Hit_Task(void *pvParameters);
 
 #endif
