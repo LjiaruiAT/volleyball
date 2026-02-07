@@ -1,5 +1,4 @@
 #include "hit_ball.h"
-// ���Ӵ���ͳ�ƽṹ
 uint32_t error_cnt = 0;
 uint32_t last_error_time = 0;
 ErrorStats_t error_stats = {0};
@@ -19,7 +18,6 @@ TaskHandle_t Hit_Task_Handle;
 
 void Hit_Task(void *pvParameters)
 {
-
 rm3508.pos_pid_3508.Kp =0.0f;
 rm3508.pos_pid_3508.Ki =0.0f;
 rm3508.pos_pid_3508.Kd =0.0f;
@@ -56,7 +54,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     if (huart->Instance == USART6)
     {
         RS485RecvIRQ_Handler(&rs485bus, huart, size);
-        err_timer_cnt=0;    //ÿ����һ�Σ�������
+        err_timer_cnt=0;   
     }
 }
 
@@ -64,34 +62,25 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART6)
     {
-        uint32_t now = HAL_GetTick();
-        
-        // ������Ƶ�ʣ��������и�λ
+        uint32_t now = HAL_GetTick();       
         if ((now - error_stats.last_error_time) < 10) { // 10ms�ڶ�δ���
             error_stats.continuous_errors++;
         } else {
-            error_stats.continuous_errors = 0; // ���������������
+            error_stats.continuous_errors = 0; 
         }
         error_stats.last_error_time = now;
         
-        // ��ֹͣDMA���䣬��������������־ʱ�����µ��жϻ����
         HAL_UART_DMAStop(huart);
         
-        // ����HAL״̬
         huart->ErrorCode = HAL_UART_ERROR_NONE;
         huart->RxState = HAL_UART_STATE_READY;
         huart->gState = HAL_UART_STATE_READY;
-        
-        // Ȼ����������־ - ����STM32F4�ο��ֲ�Ҫ���˳��
         uint32_t isrflags = READ_REG(huart->Instance->SR);
-        
-        // ��˳�������ִ����־�������ȶ�SR�ٶ�DR���������
         if (isrflags & (USART_SR_ORE | USART_SR_NE | USART_SR_FE)) {
-            // ����ORE��NE��FE������Ҫ�ȶ�SR�ٶ�DR
+
             volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
-            volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); // �����ȡ�����ORE��NE��FE
+            volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); 
             
-            // ͳ�ƾ���Ĵ�������
             if (isrflags & USART_SR_ORE) {
                 error_stats.overrun++;
             }
@@ -108,13 +97,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
             volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
             error_stats.parity++;
         }
-        
-
         error_stats.total++;
         error_cnt = error_stats.total; 
-        
         last_error_time = now;
-        
         RS485RecvIRQ_Handler(&rs485bus, huart, 0);
     }
 }
@@ -126,6 +111,6 @@ uint8_t buf[8];
     {
         uint32_t id = CAN_Receive_DataFrame(hcan, buf);
         Motor3508Recv(&rm3508.motor_3508, hcan, id, buf);
-}
+    }
 }
 

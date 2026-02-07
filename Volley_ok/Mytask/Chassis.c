@@ -29,14 +29,10 @@ PID2 vesc1;
 PID2 vesc2;
 PID2 vesc3;
 PID2 vesc4;
-
 uint8_t flag = 0;
-
-
 float Vx =0;   //前后移动
 float Vy =0;   //左右移动
 float Wz =0;   //顺逆自转
-
 //该变量的值可能会被程序外的因素（如硬件、其他线程）修改
 volatile float v1 = 0.0f;
 volatile float v2 = 0.0f;
@@ -51,7 +47,7 @@ volatile float wheel_four =0.0f;  //后左
 TaskHandle_t Remote_Handle;
 void Remote(void *pvParameters)
 {
-	  portTickType xLastWakeTime = xTaskGetTickCount();
+	portTickType xLastWakeTime = xTaskGetTickCount();
 
 	vesc1.Kp =0.950f;
 	vesc1.Ki = 0.0001f;
@@ -73,13 +69,11 @@ void Remote(void *pvParameters)
 	vesc4.Kd = 4.220f;
 	vesc4.limit = 100000.0f;
 	vesc4.output_limit = 60.0f;
-
 	for(;;)
 	{
-
 			Vx = - remote_to_velocity(&Remote_Control.Ex);
 			Vy = - remote_to_velocity(&Remote_Control.Ey);
-    	    Wz =   remote_to_Omega(&Remote_Control.Eomega);
+    	Wz =   remote_to_Omega(&Remote_Control.Eomega);
 
 			v1 = -(sqrt(2.0f)/2.0)*(Vx + Vy + 2*LENGTH*Wz);;
 			v2 = (sqrt(2.0f)/2.0)*(Vx - Vy- 2*LENGTH*Wz);
@@ -97,11 +91,11 @@ void Remote(void *pvParameters)
 			PID_Control2((float)(steering3.epm / 7.0f/(3.4f)), (wheel_three ), &vesc3);
 			PID_Control2((float)(steering4.epm / 7.0f/(3.4f)), (wheel_four  ), &vesc4);
 
-//            VESC_SetCurrent(&steering1, vesc1.pid_out);
-//            VESC_SetCurrent(&steering2, vesc2.pid_out);
-//	          vTaskDelay(1);
-//            VESC_SetCurrent(&steering3, vesc3.pid_out);
-//            VESC_SetCurrent(&steering4, vesc4.pid_out);  
+      VESC_SetCurrent(&steering1, vesc1.pid_out);
+      VESC_SetCurrent(&steering2, vesc2.pid_out);
+	    vTaskDelay(1);
+      VESC_SetCurrent(&steering3, vesc3.pid_out);
+      VESC_SetCurrent(&steering4, vesc4.pid_out);  
 			
 		    vTaskDelayUntil(&xLastWakeTime,2);
 		
@@ -131,12 +125,12 @@ float remote_to_Omega(int16_t *remote_value) {
     return ro;
 }
 
-//void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
-//{
-//	uint8_t Recv[8] = {0};
-//	uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
-//	VESC_ReceiveHandler(&steering1, &hcan2, ID,Recv);
-//	VESC_ReceiveHandler(&steering2, &hcan2, ID,Recv);
-//	VESC_ReceiveHandler(&steering3, &hcan2, ID,Recv);
-//	VESC_ReceiveHandler(&steering4, &hcan2, ID,Recv);
-//    }
+void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	uint8_t Recv[8] = {0};
+	uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
+	VESC_ReceiveHandler(&steering1, &hcan2, ID,Recv);
+	VESC_ReceiveHandler(&steering2, &hcan2, ID,Recv);
+	VESC_ReceiveHandler(&steering3, &hcan2, ID,Recv);
+	VESC_ReceiveHandler(&steering4, &hcan2, ID,Recv);
+    }
