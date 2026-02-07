@@ -96,9 +96,8 @@ void Remote(void *pvParameters)
 	    vTaskDelay(1);
       VESC_SetCurrent(&steering3, vesc3.pid_out);
       VESC_SetCurrent(&steering4, vesc4.pid_out);  
-			
-		    vTaskDelayUntil(&xLastWakeTime,2);
-		
+
+		  vTaskDelayUntil(&xLastWakeTime,2);
 	}
 }
 

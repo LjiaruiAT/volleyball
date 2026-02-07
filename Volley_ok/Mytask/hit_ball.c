@@ -33,11 +33,15 @@ TickType_t Last_wake_time = xTaskGetTickCount();
 	for(;;)
 	{
 	PID_Control2(rm3508.motor_3508.motor.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
-    PID_Control2(rm3508.motor_3508.motor.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
-    can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;
-    MotorSend(&hcan1,0x200,can_send_buf);
-    HAL_Delay(500);
+  PID_Control2(rm3508.motor_3508.motor.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
+  can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;
+  MotorSend(&hcan1,0x200,can_send_buf);
+	HAL_Delay(500);//电机松手，排球自由落体，这时宇树电机击球
 	GoMotorSend(&let_fly.go_volleyball,let_fly.exp.exp_tor,let_fly.exp.exp_vel,let_fly.exp.exp_pos,let_fly.exp.exp_kp,let_fly.exp.exp_kd);
+		HAL_Delay(5000);
+		//GoMotorSend这里宇树电机复位
+		HAL_Delay(1000);
+		//MotorSend这里3508电机复位
 	vTaskDelayUntil(&Last_wake_time, pdMS_TO_TICKS(2));
   }
 }
