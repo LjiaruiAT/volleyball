@@ -2,6 +2,7 @@
 CubicParam_t cubic;       // 三次多项式参数
 TrajectoryState_t state;  // 存储当前位置、速度、加速度
 int take = 0;
+int ready = 0;
 
 uint32_t error_cnt = 0;
 uint32_t last_error_time = 0;
@@ -31,8 +32,6 @@ void Hit_Task(void *pvParameters)
 int16_t cur_motor_pos = GoMotorRecv(&let_fly.go_volleyball); // 获取当前位置
 float cur_pos_rad = cur_motor_pos * 2.0f * M_PI / 32768.0f; // 转成弧度
 
-
-	
 rm3508.pos_pid_3508.Kp =0.0f;
 rm3508.pos_pid_3508.Ki =0.0f;
 rm3508.pos_pid_3508.Kd =0.0f;
@@ -47,7 +46,7 @@ rm3508.vel_pid_3508.output_limit = 10000.0f;
 TickType_t Last_wake_time = xTaskGetTickCount();
 for(;;)
 	{
-		if (take == 0)
+		if (take == 0 && ready == 0)
 		{
 			// 设置三次多项式轨迹
          Cubic_SetTrajectory(&cubic, 
@@ -55,6 +54,7 @@ for(;;)
                     let_fly.exp.exp_pos, 0.0f, // 目标位姿和目标速度
                     0.2f, HAL_GetTick());    // 持续时间 0.2s (可调)，当前时间
 			
+			ready = 1;
 		}
 		if (take == 1)
 		{
