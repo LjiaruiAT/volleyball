@@ -43,6 +43,7 @@ for(;;)
 //  MotorSend(&hcan1,0x200,can_send_buf);
 	//HAL_Delay(200);//电机松手，排球自由落体，这时宇树电机击球
 	GoMotorSend(&let_fly.go_volleyball,let_fly.exp.exp_tor,let_fly.exp.exp_vel,let_fly.exp.exp_pos,let_fly.exp.exp_kp,let_fly.exp.exp_kd);
+
 //	HAL_Delay(5000);
 	//GoMotorSend这里宇树电机复位
 //	HAL_Delay(1000);
