@@ -2,7 +2,7 @@
 CubicParam_t cubic;       // 三次多项式参数
 TrajectoryState_t state;  // 存储当前位置、速度、加速度
 int take = 0;
-int ready = 0;
+int ready = 2;
 
 uint32_t error_cnt = 0;
 uint32_t last_error_time = 0;
@@ -29,8 +29,7 @@ TaskHandle_t Hit_Task_Handle;
 void Hit_Task(void *pvParameters)
 {
 	
-int16_t cur_motor_pos = GoMotorRecv(&let_fly.go_volleyball); // 获取当前位置
-float cur_pos_rad = cur_motor_pos * 2.0f * M_PI / 32768.0f; // 转成弧度
+
 
 rm3508.pos_pid_3508.Kp =0.0f;
 rm3508.pos_pid_3508.Ki =0.0f;
@@ -46,8 +45,20 @@ rm3508.vel_pid_3508.output_limit = 10000.0f;
 TickType_t Last_wake_time = xTaskGetTickCount();
 for(;;)
 	{
+		if(ready == 2 &&take == 0)
+		{
+		GoMotorSend(&let_fly.go_volleyball,
+                0,  // 保持你的期望力矩
+                0,            // 使用轨迹速度
+                0,            // 使用轨迹位置
+                0,
+                0);
+			int ret = GoMotorRecv(&let_fly.go_volleyball);
+		}
 		if (take == 0 && ready == 0)
 		{
+			int16_t cur_motor_pos = let_fly.go_volleyball.state.rad; // 获取当前位置
+      float cur_pos_rad = cur_motor_pos * 2.0f * M_PI / 32768.0f; // 转成弧度
 			// 设置三次多项式轨迹
          Cubic_SetTrajectory(&cubic, 
                     cur_pos_rad, 0.0f,       // 当前位姿和速度
@@ -57,7 +68,7 @@ for(;;)
 			ready = 1;
 		}
 		if (take == 1)
-		{
+		{ 
 			
 			uint32_t now = HAL_GetTick();
 
@@ -82,7 +93,7 @@ for(;;)
 	//GoMotorSend这里宇树电机复位
 //	HAL_Delay(1000);
 	//MotorSend这里3508电机复位
-		int ret = GoMotorRecv(&let_fly.go_volleyball);
+	
 
 	vTaskDelayUntil(&Last_wake_time, pdMS_TO_TICKS(5));
   }
