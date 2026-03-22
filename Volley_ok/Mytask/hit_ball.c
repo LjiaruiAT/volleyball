@@ -4,6 +4,7 @@ TrajectoryState_t state;  // 存储当前位置、速度、加速度
 int take = 0;
 int ready = 2;
 
+
 uint32_t error_cnt = 0;
 uint32_t last_error_time = 0;
 ErrorStats_t error_stats = {0};
@@ -11,7 +12,6 @@ QueueHandle_t cdc_recv_semphr;
 uint32_t err_timer_cnt = 0;
 uint32_t bad_Motor = 0;
 int err_check = 0;
-
 
 exp_param go_volley = {0};
 RS485_t rs485bus;
@@ -28,9 +28,6 @@ TaskHandle_t Hit_Task_Handle;
 
 void Hit_Task(void *pvParameters)
 {
-	
-
-
 rm3508.pos_pid_3508.Kp =0.0f;
 rm3508.pos_pid_3508.Ki =0.0f;
 rm3508.pos_pid_3508.Kd =0.0f;
@@ -70,20 +67,35 @@ for(;;)
 		if (take == 1)
 		{ 
 			
-			uint32_t now = HAL_GetTick();
+//			uint32_t now = HAL_GetTick();
 
-    // 获取三次多项式轨迹状态
-    Cubic_GetFullState(&cubic, now, &state);
+//    // 获取三次多项式轨迹状态
+//    Cubic_GetFullState(&cubic, now, &state);
 
-    // 用 state.pos 和 state.vel 下发电机指令
-    GoMotorSend(&let_fly.go_volleyball,
+//    // 用 state.pos 和 state.vel 下发电机指令
+//    GoMotorSend(&let_fly.go_volleyball,
+//                let_fly.exp.exp_tor,  // 保持你的期望力矩
+//                state.vel,            // 使用轨迹速度
+//                state.pos,            // 使用轨迹位置
+//                let_fly.exp.exp_kp,
+//                let_fly.exp.exp_kd);
+						Remote_Analysis();
+			/* 单次触发 */
+			if (KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Up))
+			{
+					
+			}
+			
+			int e = GoMotorRecv(&let_fly.go_volleyball);
+			GoMotorSend(&let_fly.go_volleyball,
                 let_fly.exp.exp_tor,  // 保持你的期望力矩
-                state.vel,            // 使用轨迹速度
-                state.pos,            // 使用轨迹位置
+               let_fly.exp.exp_vel,            // 使用轨迹速度
+                let_fly.exp.exp_pos,            // 使用轨迹位置
                 let_fly.exp.exp_kp,
                 let_fly.exp.exp_kd);
-			
+
 		}
+
 //	PID_Control2(rm3508.motor_3508.motor.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
 //  PID_Control2(rm3508.motor_3508.motor.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
 //  can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;

@@ -19,6 +19,12 @@
 #include "math.h"
 #include "motor.h"
 #include "motorEx.h"
+#include "dataFrame.h"
+#include "comm.h"
+#include "comm_stm32_hal_middle.h"
+
+#define MAX_VELOCITY 10.0f	  // 底盘最大速度
+#define MAX_ROBOT_OMEGA 10.0f
 #define Remote_BT_0_WIFI_1 1
 
 #if !Remote_BT_0_WIFI_1
@@ -55,27 +61,24 @@ typedef struct {
 
 #else
 
-#pragma pack(1)
-typedef struct{
-   uint8_t Left_Key_Up : 1;         
-   uint8_t Left_Key_Down : 1;       
-   uint8_t Left_Key_Left : 1;       
-   uint8_t Left_Key_Right : 1;       
-   uint8_t Left_Switch_Up_or_Left : 1;       
-   uint8_t Left_Switch_Down_or_Right: 1;       
-   uint8_t UNUSED1 : 1;
-   uint8_t UNUSED2 : 1;
 
-   uint8_t Right_Key_Up : 1;        
-   uint8_t Right_Key_Down : 1;      
-   uint8_t Right_Key_Left : 1;      
-   uint8_t Right_Key_Right : 1;     
-   uint8_t Right_Switch_Up_or_Right : 1;      
-   uint8_t Right_Switch_Down_or_Left : 1;      
-   uint8_t UNUSED3 : 1; 
-   uint8_t UNUSED4 : 1;
+typedef struct{
+	uint8_t Left_Key_Up;         
+	uint8_t Left_Key_Down;       
+	uint8_t Left_Key_Left;       
+	uint8_t Left_Key_Right;       
+	uint8_t Left_Switch_Up;       
+	uint8_t Left_Switch_Down;
+	uint8_t Left_Broadside_Key;
+
+	uint8_t Right_Key_Up;        
+	uint8_t Right_Key_Down;      
+	uint8_t Right_Key_Left;      
+	uint8_t Right_Key_Right;     
+	uint8_t Right_Switch_Up;      
+	uint8_t Right_Switch_Down;      
+	uint8_t Right_Broadside_Key;
 } hw_key_t;
-  
 //遥控模式（蓝牙）
 typedef struct {
 	uint8_t head;
@@ -102,13 +105,16 @@ typedef enum{
     REMOTE,
     AUTO,
 }ChassisMode;
-
 extern uint8_t usart4_dma_buff[30]; //串口接收数据
 
 extern UART_DataPack RemoteData;  //将串口接收的数据存到这里
 extern Remote_Handle_t Remote_Control; //取出遥控器数据
 extern ChassisMode chassis_mode;
-
+extern uint8_t usart5_buff[30];
+extern ChassisMode chassis_mode;
+extern uint8_t usart5_buff[30];
+extern PackControl_t recv_data;
+extern Remote_Handle_t recv_pack;
 void Updatakey(Remote_Handle_t * xx);
 void Move_Task(void *pvParameters);
 void Task_Init(void);

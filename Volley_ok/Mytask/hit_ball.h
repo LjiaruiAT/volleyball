@@ -46,4 +46,5 @@ typedef struct {
 } Rm3508;
 
 void Hit_Task(void *pvParameters);
-
+extern  void Key_Parse(uint32_t key, hw_key_t *out);
+extern void Remote_Analysis();
