@@ -25,6 +25,8 @@
 #include "VESC.h"
 #include "step.h"
 void Task_Init(void);
+void send_flag(uint8_t val);
+
 
 TaskHandle_t Remote_Jy61_Task_Handle;
 void Remote_Analysis();
@@ -107,6 +109,8 @@ volatile float wheel_three=0.0f;
 //------------------------------------------------------
 TaskHandle_t Hit_Task_Handle;
 void Hit_Task(void *pvParameters);
+TaskHandle_t Back_Task_Handle;
+void Back_Task(void *pvParameters);
 CubicParam_t cubic; 
 typedef struct 
 {
@@ -116,6 +120,24 @@ typedef struct
     float exp_kp;
     float exp_kd;
 }exp_param;
+
+typedef struct
+{
+  float expect_torque;
+	float expect_angle;
+	float expect_omega;
+	float kp;
+	float kd;
+}RobStride_Expect;
+
+typedef struct
+{
+  float reset_torque;
+	float reset_angle;
+	float reset_omega;
+	float kp;
+	float kd;
+}RobStride_Reset;
 typedef struct
 {
 	exp_param exp;
@@ -134,15 +156,5 @@ typedef struct {
     uint32_t recovery_attempts;
     uint32_t last_recovery_time;
 } ErrorStats_t;
-//typedef struct {
-//    float x;
-//    float y;
-//} Vec2;
-typedef struct {
-    Motor3508Ex_t motor_3508;
-    PID2 pos_pid_3508;
-    PID2 vel_pid_3508;
-} Rm3508;
-
 void Hit_Task(void *pvParameters);
 #endif
