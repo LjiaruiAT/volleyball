@@ -53,6 +53,8 @@ typedef struct{
 typedef struct {
     float Ex;
     float Ey;
+	
+	
     float Eomega;
     hw_key_t First,Second;
 } Remote_Handle_t;
@@ -63,23 +65,16 @@ typedef enum{
     REMOTE,
     AUTO,
 }ChassisMode;;
-ChassisMode chassis_mode = REMOTE;
-PackControl_t recv_pack;
-Remote_Handle_t Remote_Control; //取出遥控器数据
-//Chassis_t chassis;
-uint8_t recv_buff[20] = {0};
-uint8_t usart4_dma_buff[30];
-uint8_t usart5_dma_buff[30];
-float rocker_filter[4] = {0};
-
 #define MAX_ROBOT_OMEGA ANGLE2RAD(30.0f)
 extern SemaphoreHandle_t Jy61_semaphore;
 extern SemaphoreHandle_t remote_semaphore;
 extern SemaphoreHandle_t Remote_semaphore;
 extern ChassisMode chassis_mode;
-//--------------------------------底盘控制-------------------------------------------------------------------------
+extern Remote_Handle_t Remote_Control;
+extern uint8_t usart4_dma_buff[30];
+extern uint8_t usart5_dma_buff[60];
 void Remote(void *pvParameters);
-TaskHandle_t Remote_Handle;
+extern TaskHandle_t Remote_Handle;
 typedef struct
 {
 	PID2 PID;
@@ -89,29 +84,28 @@ typedef struct
 }VESC_INIT;
 
 #define PI 3.14159265359f
-#define MAX_VELOCITY 10.0f	  // 底盘最大速度
-#define MAX_OMEGA PI*10	 	 //最大角速度
-#define LENGTH 0.457f	 	//底盘中心到轮子的距离
-#define WHEEL_RADIUS 0.075f  //轮的半径
-#define MODE_t  1		  //等于0为漫反射开关模式，1为摄像头模式
+#define MAX_VELOCITY 15.0f	  
+#define MAX_OMEGA PI*15	 	
+#define LENGTH 0.457f	 
+#define WHEEL_RADIUS 0.075f  
+#define MODE_t  1		 
 #define ANGLE2RAD(x) (x) * PI / 180.0f
 #define MAX_ROBOT_VEL 5.0f // m/s
-float Vx =0;  
-float Vy =0;  
-float Wz =0;  
-volatile float v1 = 0.0f;
-volatile float v2 = 0.0f;
-volatile float v3 = 0.0f;
-volatile float wheel_one = 0.0f; 
-volatile float wheel_two = 0.0f; 
-volatile float wheel_three=0.0f; 
+extern float Vx;
+extern float Vy;
+extern float Wz;
+extern volatile float v1;
+extern volatile float v2;
+extern volatile float v3;
+extern volatile float wheel_one;
+extern volatile float wheel_two;
+extern volatile float wheel_three;
 #define KEY_RISING_EDGE(cur, last, field)  ((cur.field == 1) && (last.field == 0))
-//------------------------------------------------------
-TaskHandle_t Hit_Task_Handle;
+extern TaskHandle_t Hit_Task_Handle;
 void Hit_Task(void *pvParameters);
-TaskHandle_t Back_Task_Handle;
+extern TaskHandle_t Back_Task_Handle;
 void Back_Task(void *pvParameters);
-CubicParam_t cubic; 
+extern CubicParam_t cubic; 
 typedef struct 
 {
     float exp_tor;
@@ -138,23 +132,15 @@ typedef struct
 	float kp;
 	float kd;
 }RobStride_Reset;
-typedef struct
-{
-	exp_param exp;
-	GO_MotorHandle_t go_volleyball;
-	PID2 vel_pid;
-	PID2 pos_pid;
-}push;
-typedef struct {
-    uint32_t total;
-    uint32_t overrun;
-    uint32_t frame;
-    uint32_t noise;
-    uint32_t parity;
-    uint32_t last_error_time;
-    uint32_t continuous_errors;
-    uint32_t recovery_attempts;
-    uint32_t last_recovery_time;
-} ErrorStats_t;
+
+// 状态机
+typedef enum {
+    READY = 0,//等待
+    ALIGN,//复位
+    FIRE, //击球
+    PLAN  //轨迹开始规划
+} IFState;
+void Remote_Analysis_Task(void *pvParameters);
+
 void Hit_Task(void *pvParameters);
 #endif

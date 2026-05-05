@@ -5,7 +5,31 @@
 #include "semphr.h"
 #include "RobStride2.h"
 #include "step.h"
+ChassisMode chassis_mode = REMOTE;
+Remote_Handle_t Remote_Control;
+uint8_t usart4_dma_buff[30];
+uint8_t usart5_dma_buff[60];
+float Vx = 0;
+float Vy = 0;
+float Wz = 0;
+int d = 0;
+volatile float v1 = 0.0f;
+volatile float v2 = 0.0f;
+volatile float v3 = 0.0f;
+volatile float wheel_one = 0.0f;
+volatile float wheel_two = 0.0f;
+volatile float wheel_three = 0.0f;
+TaskHandle_t Remote_Handle;
+TaskHandle_t Hit_Task_Handle;
+TaskHandle_t Back_Task_Handle;
+CubicParam_t cubic;
+char init_done = 0;
 
+TaskHandle_t Remote_Analysis_Handle;
+Pack_TransRemote_t trans_pack;
+uint8_t recv_buff[20] = {0};
+float rocker_filter[4] = {0};
+extern SemaphoreHandle_t Remote_semaphore;  // ÔøΩ≈∫ÔøΩÔøΩÔøΩ
 void Task_Init()
 {
 
@@ -18,9 +42,6 @@ void Task_Init()
           NULL,
           4,
           &Remote_Handle); 
-//	
-
-
 	xTaskCreate(Hit_Task,
 			 "Hit_Task",
 				2558,
@@ -33,7 +54,11 @@ void Task_Init()
 				NULL,
 				4,
 				&Back_Task_Handle); 
+						xTaskCreate(Remote_Analysis_Task, "Remote_Analysis_Task", 128, NULL, 4, &Remote_Analysis_Handle);
+
 }
+PackControl_t recv_pack;
+
 static void Key_Parse(uint32_t key, hw_key_t *out)
 {
     out->Right_Switch_Up     = (key & KEY_Right_Switch_Up)     ? 1 : 0;
@@ -56,27 +81,26 @@ static void Key_Parse(uint32_t key, hw_key_t *out)
 
     out->Left_Broadside_Key  = (key & KEY_Left_Broadside_Key)  ? 1 : 0;
 }
+
 void Remote_Analysis()
 {
-	/* 1. ±£¥Ê…œ“ª÷° */
-	Remote_Control.Second = Remote_Control.First;
-	/* 2. Ω‚Œˆµ±«∞∞¥º¸ */
-	Key_Parse(recv_pack.Key, &Remote_Control.First);
-	
-	Remote_Control.Ex = recv_pack.rocker[1] / 1977.0f *MAX_ROBOT_VEL;
-	Remote_Control.Ey = recv_pack.rocker[0] / 1798.0f *MAX_ROBOT_VEL;
-	Remote_Control.Eomega = recv_pack.rocker[2] / 1847.0f * MAX_ROBOT_OMEGA;
-}
-void Rocker_Filter(PackControl_t *data)
-{
-    float alpha = 0.6f;
-
-    for(int i = 0; i < 4; i++)
+    if(xSemaphoreTake(Remote_semaphore, pdMS_TO_TICKS(200)) == pdTRUE)
     {
-        rocker_filter[i] = alpha * data->rocker[i] +
-                          (1.0f - alpha) * rocker_filter[i];
+      /* 1. ‰øùÂ≠ò‰∏ä‰∏ÄÂ∏ß */
+      Remote_Control.Second = Remote_Control.First;
+			
+      /* 2. Ëß£ÊûêÂΩìÂâçÊåâÈîÆ */
+      Key_Parse(recv_pack.Key, &Remote_Control.First);
 
-        data->rocker[i] = rocker_filter[i];
+      Remote_Control.Ex = - recv_pack.rocker[0] / 1647.0f *MAX_ROBOT_VEL;
+      Remote_Control.Ey = recv_pack.rocker[1] / 1647.0f *MAX_ROBOT_VEL;
+      Remote_Control.Eomega = recv_pack.rocker[2] / 1647.0f * MAX_ROBOT_OMEGA;
+    }else {
+      Remote_Control.Ex = 0;
+      Remote_Control.Ey = 0;
+      Remote_Control.Eomega = 0;
+
+      memset(&Remote_Control.First, 0, sizeof(Remote_Control.First));
     }
 }
 
@@ -84,9 +108,10 @@ void MyRecvCallback(uint8_t *src, uint16_t size, void *user_data)
 {
     memcpy(&recv_buff, src, size);
     memcpy(&recv_pack, recv_buff, sizeof(recv_pack));
-    Rocker_Filter(&recv_pack);
+    xSemaphoreGive(Remote_semaphore);
 }
 CommPackRecv_Cb  recv_cb = MyRecvCallback;
+
 
 VESC_INIT vesc_1 ={
 	.steer.motor_id = 0x01,
@@ -107,38 +132,37 @@ VESC_INIT vesc_3 ={
 	
 };
 uint8_t tr_buf[3] = {0xAA, 0x00, 0x55};
-int a = 0;
+int a = 1;
 void Remote(void *pvParameters)
 {
-    portTickType xLastWakeTime = xTaskGetTickCount();
-      g_comm_handle = Comm_Init(&huart5);
-      RemoteCommInit(NULL);
-      register_comm_recv_cb(recv_cb, 0x01, &recv_pack);
-    vesc_1.PID.Kp = 0.3f;
-   	vesc_1.PID.Ki = 0.0005f;
-	vesc_1.PID.Kd = 1.5f;
+    g_comm_handle = Comm_Init(&huart5);
+    RemoteCommInit(NULL);
+    register_comm_recv_cb(recv_cb, 0x01, &recv_pack);
+    vesc_1.PID.Kp = 0.5f;
+   	vesc_1.PID.Ki =0.002f;
+	vesc_1.PID.Kd = 0.1f;
     vesc_1.PID.limit = 10000.0f;
 	vesc_1.PID.output_limit = 40.0f;
-    vesc_2.PID.Kp =0.3f;
-	vesc_2.PID.Ki = 0.0005f;
-  	vesc_2.PID.Kd = 1.5f;
+    vesc_2.PID.Kp =0.5f;
+	vesc_2.PID.Ki = 0.002f;
+  	vesc_2.PID.Kd = 0.1f;
     vesc_2.PID.limit = 10000.0f;
   	vesc_2.PID.output_limit = 40.0f;
-    vesc_3.PID.Kp =0.3f;
-	vesc_3.PID.Ki = 0.0005f;
-  	vesc_3.PID.Kd = 1.5f;
+    vesc_3.PID.Kp =0.5f;
+	vesc_3.PID.Ki = 0.002f;
+  	vesc_3.PID.Kd = 0.1f;
     vesc_3.PID.limit = 100000.0f;
 	vesc_3.PID.output_limit = 40.0f;
+	    portTickType xLastWakeTime = xTaskGetTickCount();
     for(;;)
     {
-			Remote_Analysis();
-        v1 = -Remote_Control.Ex*0.5f - Remote_Control.Ey*(sqrt(3.0f)/2.0) + LENGTH * Remote_Control.Eomega;
-        v2 = -Remote_Control.Ex*0.5f + Remote_Control.Ey*(sqrt(3.0f)/2.0) + LENGTH * Remote_Control.Eomega;
-        v3 =  Remote_Control.Eomega + LENGTH * Wz;
+        v1 = -Remote_Control.Ex*0.5f*MAX_VELOCITY + Remote_Control.Ey*(sqrt(3.0f)/2.0)*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v2 = -Remote_Control.Ex*0.5f*MAX_VELOCITY - Remote_Control.Ey*(sqrt(3.0f)/2.0)*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v3 =    Remote_Control.Ex*(sqrt(3.0f)/2.0)*MAX_VELOCITY + Remote_Control.Eomega*MAX_OMEGA*LENGTH;
 
-        wheel_one   = -(v1 / (2.0f * PI * WHEEL_RADIUS));
-        wheel_two   =  (v2 / (2.0f * PI * WHEEL_RADIUS));
-        wheel_three = -(v3 / (2.0f * PI * WHEEL_RADIUS));
+        wheel_one   = (-(v1 / (2.0f * PI * WHEEL_RADIUS)));
+        wheel_two   = ((v2 / (2.0f * PI * WHEEL_RADIUS)));
+        wheel_three = (-(v3 / (2.0f * PI * WHEEL_RADIUS)));
 
         float wheel1_actual = (float)vesc_1.steer.epm / 7.0f / 3.4f;
         float wheel2_actual = (float)vesc_2.steer.epm / 7.0f / 3.4f;
@@ -151,73 +175,61 @@ void Remote(void *pvParameters)
         VESC_SetCurrent(&vesc_1.steer, vesc_1.PID.pid_out);
         VESC_SetCurrent(&vesc_2.steer, vesc_2.PID.pid_out);
         VESC_SetCurrent(&vesc_3.steer, vesc_3.PID.pid_out);
-			if(recv_pack.rocker[0] == 0 && recv_pack.rocker[1] == 0 &&recv_pack.rocker[2] == 0 )
-			{
-                Remote_Control.Ex = 0;
-				Remote_Control.Ey = 0;
-				Remote_Control.Eomega = 0;
 
-				//∞¥º¸◊¥Ã¨«Â¡„
-				memset(&recv_pack.Key, 0, sizeof(uint32_t));
-		 	}
 
         if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Left_Switch_Up))
             chassis_mode = REMOTE;
         if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Left_Switch_Down))
             chassis_mode = AUTO;
-			if(a ==1)
-                 {
-					send_flag(0x01);
-				 }
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Right))
+           init_done = 1;
         vTaskDelayUntil(&xLastWakeTime, 2);
     }
 }
+void Remote_Analysis_Task(void *pvParameters)
+{
 
-
-
-
+	while(1)
+	{
+		Remote_Analysis();
+	}
+}
 int16_t feel_1 = 0;
 int16_t feel_2 = 0;
 int16_t feel_3 = 0;
 int16_t feel_4 = 0;
-typedef enum {
-    BALL_IDLE = 0,
-    BALL_PREPARE,
-    BALL_HIT_LETF,
-    BALL_RESET
-} BallState_t;
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-}
+
+
+IFState ALLState = READY;
+
 RobStride_Expect R_left_expect = {
 	.expect_angle = -0.355f,
 	.expect_omega = 0.0f,
-	.expect_torque = -3.3f,
-	.kp = 280.0f,
+	.expect_torque = -3.7f,
+	.kp = 300.0f,
 	.kd = 8.0f
-
 };
 RobStride_Expect R_right_expect = {
 	.expect_angle = 0.39f,
 	.expect_omega = 0.0f,
-	.expect_torque = 3.3f,
-	.kp = 280.0f,
+	.expect_torque = 3.7f,
+	.kp = 300.0f,
 	.kd = 8.0f
 };
 
 RobStride_Reset R_left_reset = {
 	.reset_angle = 0.0f,
 	.reset_omega = 0.0f,
-	.reset_torque = 0.5f,
-	.kp = 10.0f,
-	.kd = 1.0f
+	.reset_torque = -2.45f,
+	.kp = 2.0f,
+	.kd = 0.0f
 };
 RobStride_Reset R_right_reset = {
 	.reset_angle = 0.0f,
 	.reset_omega = 0.0f,
-	.reset_torque = -0.5f,
-	.kp = 10.0f,
-	.kd = 1.0f
+	.reset_torque = 2.45f,
+	.kp = 2.0f,
+	.kd = 0.0f
 };
 
 RobStride_t R_left;
@@ -229,18 +241,14 @@ CubicParam_t traj_right;
 TrajectoryState_t traj_left_state;
 TrajectoryState_t traj_right_state;
 
-//RobStride_Expect R_left_expect;
-//RobStride_Expect R_right_expect;
-
-uint8_t flag = 0;// ∏¥Œª±Í÷æ
-static uint8_t ball_back_trigger = 0;// ª˜«Ú±Í÷æ
-static uint8_t traj_started = 0;// πÏº£πÊªÆø™ º±Í÷æ
+static uint8_t ball_back_trigger = 0;// ÂáªÁêÉÊ†áÂøó
 static GPIO_PinState key1, key2, key3, key4;
-float time = 0.25f;// πÏº£πÊªÆ ±º‰
+float time = 0.18f;// ËΩ®ËøπËßÑÂàíÊó∂Èó¥
+static uint8_t trigger_lock = 0; // Èò≤Ê≠¢ÁîµÊú∫Êå°‰ΩèÂÖâÁîµÈó®ËØØËß¶
 
 void Back_Task(void *pvParameters)
 {
-		vTaskDelay(3000);
+	vTaskDelay(3000);
     RobStrideInit(&R_left, &hcan1, 0x01, RobStride_MotionControl, RobStride_04);
 	  RobStrideInit(&R_right, &hcan1, 0x02, RobStride_MotionControl, RobStride_04);
 	  vTaskDelay(100);
@@ -253,6 +261,7 @@ void Back_Task(void *pvParameters)
 
     RobStrideResetAngle(&R_left);
     RobStrideResetAngle(&R_right);
+	  vTaskDelay(100);
 	
 	  R_left_reset.reset_angle = R_left.state.rad;
 	  R_right_reset.reset_angle = R_right.state.rad;
@@ -264,23 +273,34 @@ void Back_Task(void *pvParameters)
 		key2 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
 		key3 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_2);
 		key4 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3);
+		
 		if(key1 == GPIO_PIN_SET || key2 == GPIO_PIN_SET || key3 == GPIO_PIN_SET || key4 == GPIO_PIN_SET)
+		{
+			ball_back_trigger = 1;
+		}
+		
+		if(ALLState == READY && trigger_lock == 0)
 			{
-				ball_back_trigger = 1;
-			}
-
-		if (ball_back_trigger == 1 && traj_started == 0)   // “ª¥Œ¥•∑¢
+			
+			if(ball_back_trigger == 1 && trigger_lock == 0)
+				{
+					ALLState = PLAN;
+					trigger_lock = 1;
+				}
+		  }
+		
+		else if (ALLState == PLAN)
 		{
 				Cubic_SetTrajectory(
 						&traj_left,
-						R_left.state.rad,        // µ±«∞’Ê µΩ«∂»
-						R_left.state.omega,      // µ±«∞’Ê µÀŸ∂»
-						R_left_expect.expect_angle,          // ƒø±ÍΩ«∂»
+						R_left.state.rad,            // ÂΩìÂâçÁúüÂÆûËßíÂ∫¶
+						R_left.state.omega,          // ÂΩìÂâçÁúüÂÆûÈÄüÂ∫¶
+						R_left_expect.expect_angle,  // ÁõÆÊ†áËßíÂ∫¶
 						0,
-						time,                  
+						time, 
 						xTaskGetTickCount()
 				);
-
+			
 				Cubic_SetTrajectory(
 						&traj_right,
 						R_right.state.rad,
@@ -290,10 +310,10 @@ void Back_Task(void *pvParameters)
 						time,
 						xTaskGetTickCount()
 				);
-				traj_started = 1;
+				ALLState = FIRE;
 		}
 
-		if(ball_back_trigger == 1)
+		else if(ALLState == FIRE)
 		{
 		 if (traj_left.is_running || traj_right.is_running)
 		 {
@@ -319,17 +339,18 @@ void Back_Task(void *pvParameters)
 			RobStrideMotionControl(&R_left, 0x01,
 			0.0f, traj_left.target_pos, 0.0f,
 			R_left_expect.kp, R_left_expect.kd);
-
+				
 			RobStrideMotionControl(&R_right, 0x02,
 			0.0f, traj_right.target_pos, 0.0f,
 			R_right_expect.kp, R_right_expect.kd);
-				
-			traj_started = 0;
-			ball_back_trigger = 0;
+			
+			vTaskDelay(300);
+			
+			ALLState = ALIGN;
 			}
 		}
 
-		if( flag == 0 && ball_back_trigger == 0)
+		else if(ALLState == ALIGN)
 			{				
 			RobStrideMotionControl(&R_left, 0x01, 
 				R_left_reset.reset_torque, 
@@ -338,29 +359,24 @@ void Back_Task(void *pvParameters)
 				R_left_reset.kp, 
 				R_left_reset.kd);
 			RobStrideMotionControl(&R_right, 0x02, 
-				R_right_reset.reset_torque, 
+			  R_right_reset.reset_torque, 
 				R_right_reset.reset_angle, 
 				R_right_reset.reset_omega, 
 				R_right_reset.kp, 
 				R_right_reset.kd);
-//			RobStrideMotionControl(&R_left, 0x01, 0, R_left_reset.reset_angle, 0, 0, 0);
-//			RobStrideMotionControl(&R_right, 0x02, 0, R_right_reset.reset_angle, 0, 0, 0);
+				
+		if(fabs(R_left.state.rad - R_left_reset.reset_angle) < 0.03f &&
+		   fabs(R_right.state.rad - R_right_reset.reset_angle) < 0.03f)
+				{
+					ALLState = READY;
+					trigger_lock = 0;
+					ball_back_trigger = 0;
+				}
 			}
-			
 	 vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
 	}
 }
-void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-uint8_t buf[8];
-    if (hcan->Instance == CAN2)
-    {
-	uint32_t ID = CAN_Receive_DataFrame(&hcan2, buf);
-	RobStrideRecv_Handle(&R_left, &hcan2, ID, buf);
-  RobStrideRecv_Handle(&R_right, &hcan2, ID, buf);
 
-    }
-}
 void send_flag(uint8_t val)
 {
     static uint8_t tx_buf[3];
@@ -375,165 +391,200 @@ void send_flag(uint8_t val)
     }
 }
 
-CubicParam_t cubic;       // »˝¥Œ∂‡œÓ Ω≤Œ ˝
-TrajectoryState_t state;  // ¥Ê¥¢µ±«∞Œª÷√°¢ÀŸ∂»°¢º”ÀŸ∂»
-int take = 0;
-int ready = 2;
 
-uint32_t error_cnt = 0;
-uint32_t last_error_time = 0;
-ErrorStats_t error_stats = {0};
-QueueHandle_t cdc_recv_semphr;
-uint32_t err_timer_cnt = 0;
-uint32_t bad_Motor = 0;
-int err_check = 0;
+int b = 100;
+int c = 1000;
 
-
-exp_param go_volley = {0};
-RS485_t rs485bus;
-exp_param exp_3508;
-QueueHandle_t cdc_recv_semphr;
-int16_t can_send_buf[4];
-push let_fly=
-{
-.go_volleyball.motor_id = 0x01,
-.go_volleyball.rs485 = &rs485bus
-};
+int16_t motorCurrentBuf[4] = {0};
+Motor3508Ex_t Lift_Motor;
 TaskHandle_t Hit_Task_Handle;
+float first_angle = 0.0f;
+float second_angle = 0.0f;
+float angle_offert = 6810.95;
+int rad_init = 0;
+typedef enum {
+    BALL_IDLE = 0,       
+    BALL_PREPARE,        
+    BALL_HIT,            
+    BALL_RESET           
+} BallState_t;
 void Hit_Task(void *pvParameters)
 {
-	
+	Lift_Motor.ID =0x203;
+	Lift_Motor.hcan =&hcan1;
+Lift_Motor.pos_pid.Kp = 22.1f;
+	  Lift_Motor.pos_pid.Ki = 0.0f;
+  	Lift_Motor.pos_pid.Kd = 0.0f;
+	  Lift_Motor.pos_pid.limit = 10000.0f;
+    Lift_Motor.pos_pid.output_limit = 9006.3f;
+
+	  Lift_Motor.vel_pid.Kp = 8.0f;
+    Lift_Motor.vel_pid.Ki = 0.01f;
+    Lift_Motor.vel_pid.Kd = 0.0f;
+    Lift_Motor.vel_pid.limit = 10000.0f;
+    Lift_Motor.vel_pid.output_limit = 16384.0f;
 
 
+    TickType_t last_wake = xTaskGetTickCount();
 
-TickType_t Last_wake_time = xTaskGetTickCount();
-for(;;)
-	{
-		if(ready == 2 &&take == 0)
-		{
-		GoMotorSend(&let_fly.go_volleyball,
-                0,  // ±£≥÷ƒ„µƒ∆⁄Õ˚¡¶æÿ
-                0,            //  π”√πÏº£ÀŸ∂»
-                0,            //  π”√πÏº£Œª÷√
-                0,
-                0);
-			int ret = GoMotorRecv(&let_fly.go_volleyball);
-		}
-		if (take == 0 && ready == 0)
-		{
-			int16_t cur_motor_pos = let_fly.go_volleyball.state.rad; // ªÒ»°µ±«∞Œª÷√
-      float cur_pos_rad = cur_motor_pos * 2.0f * M_PI / 32768.0f; // ◊™≥…ª°∂»
-			// …Ë÷√»˝¥Œ∂‡œÓ ΩπÏº£
-         Cubic_SetTrajectory(&cubic, 
-                    cur_pos_rad, 0.0f,       // µ±«∞Œª◊À∫ÕÀŸ∂»
-                    let_fly.exp.exp_pos, 0.0f, // ƒø±ÍŒª◊À∫Õƒø±ÍÀŸ∂»
-                    0.2f, HAL_GetTick());    // ≥÷–¯ ±º‰ 0.2s (ø…µ˜)£¨µ±«∞ ±º‰
-			
-			ready = 1;
-		}
-		if (take == 1)
-		{ 
-			
-			uint32_t now = HAL_GetTick();
+    BallState_t ball_state = BALL_IDLE;
+    TickType_t state_start = last_wake;
 
-    // ªÒ»°»˝¥Œ∂‡œÓ ΩπÏº£◊¥Ã¨
-    Cubic_GetFullState(&cubic, now, &state);
-
-    // ”√ state.pos ∫Õ state.vel œ¬∑¢µÁª˙÷∏¡Ó
-    GoMotorSend(&let_fly.go_volleyball,
-                let_fly.exp.exp_tor,  // ±£≥÷ƒ„µƒ∆⁄Õ˚¡¶æÿ
-                state.vel,            //  π”√πÏº£ÀŸ∂»
-                state.pos,            //  π”√πÏº£Œª÷√
-                let_fly.exp.exp_kp,
-                let_fly.exp.exp_kd);
-			
-		}
-//	PID_Control2(rm3508.motor_3508.motor.MchanicalAngle,exp_3508.exp_pos,&rm3508.pos_pid_3508);
-//  PID_Control2(rm3508.motor_3508.motor.Speed,rm3508.pos_pid_3508.pid_out,&rm3508.vel_pid_3508);
-//  can_send_buf[0]=(int16_t)rm3508.pos_pid_3508.pid_out;
-//  MotorSend(&hcan1,0x200,can_send_buf);
-//  HAL_Delay(200);//µÁª˙À… ÷£¨≈≈«Ú◊‘”…¬‰ÃÂ£¨’‚ ±”Ó ˜µÁª˙ª˜«Ú
-//	HAL_Delay(5000);
-	//GoMotorSend’‚¿Ô”Ó ˜µÁª˙∏¥Œª
-//	HAL_Delay(1000);
-	//MotorSend’‚¿Ô3508µÁª˙∏¥Œª
-	GoMotorSend(&let_fly.go_volleyball,
-                0,  // ±£≥÷ƒ„µƒ∆⁄Õ˚¡¶æÿ
-                0,            //  π”√πÏº£ÀŸ∂»
-                0,            //  π”√πÏº£Œª÷√
-                0,
-                0);
-			int ret = GoMotorRecv(&let_fly.go_volleyball);
-
-	vTaskDelayUntil(&Last_wake_time, pdMS_TO_TICKS(5));
-  }
+while(1)
+    {
+        TickType_t now = xTaskGetTickCount();
+        if (rad_init<100)
+        {
+             first_angle = Lift_Motor.motor.Angle_DEG;
+             second_angle = first_angle + angle_offert;
+             rad_init++;
 }
+
+        // ---------------------
+        // Áä∂ÊÄÅÊú∫
+        switch (ball_state)
+        {
+            case BALL_IDLE:
+if (init_done) {
+    state_start = now; 
+    ball_state = BALL_PREPARE;
+	a = 1;
+}
+                break;
+
+            case BALL_PREPARE:
+                if ((now - state_start) < pdMS_TO_TICKS(b))
+                {
+PID_Control2(Lift_Motor.motor.Angle_DEG,second_angle,&Lift_Motor.pos_pid);
+  PID_Control2(Lift_Motor.motor.Speed,Lift_Motor.pos_pid.pid_out,&Lift_Motor.vel_pid);
+  motorCurrentBuf[2]=(int16_t)Lift_Motor.vel_pid.pid_out;
+MotorSend(&hcan1,0x200,motorCurrentBuf);	
+                }
+                else
+                {
+                    ball_state = BALL_HIT;
+                    state_start = now;
+                }
+                break;
+            case BALL_HIT:
+                if ((now - state_start) < pdMS_TO_TICKS(c)) // ËΩ®ËøπÊó∂Èó¥
+                {
+									               			if(a == 1){				 
+									 send_flag(0x01);
+															a =2;}
+//               			if(a == 1){				 
+//									 send_flag(0x01);
+//															a =2;}
+PID_Control2(Lift_Motor.motor.Angle_DEG,second_angle,&Lift_Motor.pos_pid);
+  PID_Control2(Lift_Motor.motor.Speed,Lift_Motor.pos_pid.pid_out,&Lift_Motor.vel_pid);
+  motorCurrentBuf[2]=(int16_t)Lift_Motor.vel_pid.pid_out;
+MotorSend(&hcan1,0x200,motorCurrentBuf);		
+                }
+								else 
+								{
+								ball_state = BALL_RESET;
+								state_start = now;
+								}
+								break;
+						case BALL_RESET:
+				if((now - state_start) < pdMS_TO_TICKS(2500))		{
+							PID_Control2(Lift_Motor.motor.Angle_DEG,first_angle,&Lift_Motor.pos_pid);
+  PID_Control2(Lift_Motor.motor.Speed,Lift_Motor.pos_pid.pid_out,&Lift_Motor.vel_pid);
+  motorCurrentBuf[2]=(int16_t)Lift_Motor.vel_pid.pid_out;
+MotorSend(&hcan1,0x200,motorCurrentBuf);	
+						}
+								                else
+                {
+                    init_done = 0;
+									a = 1;
+                    ball_state = BALL_IDLE;
+                }
+                break;
+
+            default:
+                ball_state = BALL_IDLE;
+                break;
+			}
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
+}
+}
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	if(hcan->Instance ==CAN1)
+	{
+
+
+		uint8_t Recv[8] = {0};
+
+    if (hcan->Instance == CAN1)
+    {
+			
+	uint32_t ID = CAN_Receive_DataFrame(&hcan1, Recv);
+//if(ID == 0x01) {
+    RobStrideRecv_Handle(&R_left, &hcan1, ID, Recv);
+//} else if(ID == 0x02) {
+    RobStrideRecv_Handle(&R_right, &hcan1, ID, Recv);
+//}
+//else if(ID == 0x203)
+//		{
+	int c =		Motor3508Recv(&Lift_Motor,hcan, ID, Recv);
+//		}
+			}
+}
+	}
+void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	uint8_t Recv[8] = {0};
+	uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
+VESC_ReceiveHandler(&vesc_1.steer, &hcan2, ID,Recv);
+	VESC_ReceiveHandler(&vesc_2.steer, &hcan2, ID,Recv);
+VESC_ReceiveHandler(&vesc_3.steer, &hcan2, ID,Recv);
+}
+
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART6)
+    if(huart->Instance == UART4)
     {
-        RS485SendIRQ_Handler(&rs485bus, huart);
     }
 }
-
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
-    if (huart->Instance == USART6)
-    {
-        RS485RecvIRQ_Handler(&rs485bus, huart, size);
-        err_timer_cnt=0;   
-    }
+	if (huart->Instance == UART5)
+	{
+		HAL_UART_DMAStop(&huart5);
+		Comm_UART_IRQ_Handle(g_comm_handle, &huart5, usart5_dma_buff,size);
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff,sizeof(usart5_dma_buff));
+   	__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	}
 }
-
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART6)
-    {
-        uint32_t now = HAL_GetTick();       
-        if ((now - error_stats.last_error_time) < 10) { // 10ms???¶ƒ???
-            error_stats.continuous_errors++;
-        } else {
-            error_stats.continuous_errors = 0; 
-        }
-        error_stats.last_error_time = now;
-        
-        HAL_UART_DMAStop(huart);
-        
-        huart->ErrorCode = HAL_UART_ERROR_NONE;
-        huart->RxState = HAL_UART_STATE_READY;
-        huart->gState = HAL_UART_STATE_READY;
-        uint32_t isrflags = READ_REG(huart->Instance->SR);
-        if (isrflags & (USART_SR_ORE | USART_SR_NE | USART_SR_FE)) {
+	if (huart->Instance == UART5)
+	{
+		HAL_UART_DMAStop(huart);
+		// ÈáçÁΩÆHALÁä∂ÊÄÅ
+		huart->ErrorCode = HAL_UART_ERROR_NONE;
+		huart->RxState = HAL_UART_STATE_READY;
+		huart->gState = HAL_UART_STATE_READY;
+		
+		// ÁÑ∂ÂêéÊ∏ÖÈô§ÈîôËØØÊ†áÂøó - ÊåâÁÖßSTM32F4ÂèÇËÄÉÊâãÂÜåË¶ÅÊ±ÇÁöÑÈ°∫Â∫è
+		uint32_t isrflags = READ_REG(huart->Instance->SR);
+		
+		// ÊåâÈ°∫Â∫èÂ§ÑÁêÜÂêÑÁßçÈîôËØØÊ†áÂøóÔºåÂøÖÈ°ªÂÖàËØªSRÂÜçËØªDRÊù•Ê∏ÖÈô§ÈîôËØØ
+		if (isrflags & (USART_SR_ORE | USART_SR_NE | USART_SR_FE)) 
+		{
+				// ÂØπ‰∫éORE„ÄÅNE„ÄÅFEÈîôËØØÔºåÈúÄË¶ÅÂÖàËØªSRÂÜçËØªDR
+				volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
+				volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); // Ëøô‰∏™ËØªÂèñ‰ºöÊ∏ÖÈô§ORE„ÄÅNE„ÄÅFE        
 
-            volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
-            volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); 
-            
-            if (isrflags & USART_SR_ORE) {
-                error_stats.overrun++;
-            }
-            if (isrflags & USART_SR_NE) {
-                error_stats.noise++;
-            }
-            if (isrflags & USART_SR_FE) {
-                error_stats.frame++;
-            }
-        }
-        
-        if (isrflags & USART_SR_PE) {
-
-            volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
-            error_stats.parity++;
-        }
-        error_stats.total++;
-        error_cnt = error_stats.total; 
-        last_error_time = now;
-        RS485RecvIRQ_Handler(&rs485bus, huart, 0);
-    }
+		if (isrflags & USART_SR_PE)
+		{
+				volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
+		}
+	}
+		Comm_UART_IRQ_Handle(g_comm_handle, &huart5, usart5_dma_buff, 0);
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff,sizeof(usart5_dma_buff));
+		__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	}
 }
-
-
-
-
-
-
-
