@@ -23,6 +23,7 @@
 #include "dma.h"
 #include "usart.h"
 #include "gpio.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "CANDrive.h"
@@ -97,7 +98,6 @@ int main(void)
   MX_USART6_UART_Init();
   MX_UART4_Init();
   MX_UART5_Init();
-  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 	CanFilter_Init(&hcan2);
 	HAL_CAN_Start(&hcan2);

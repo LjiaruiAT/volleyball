@@ -27,6 +27,8 @@
 /* USER CODE BEGIN Includes */
 #include "Task_Init.h"
 #include "semphr.h"
+#include "485_bus.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,8 +39,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 extern UART_HandleTypeDef huart6;
-extern RS485_t rs485bus;
 SemaphoreHandle_t remote_semaphore;
+SemaphoreHandle_t Remote_semaphore;
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -92,6 +95,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
 	  remote_semaphore=xSemaphoreCreateBinary();
+	  Remote_semaphore =xSemaphoreCreateBinary();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -99,8 +103,7 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-	
-	  RS485Init(&rs485bus, &huart6, GPIOA, GPIO_PIN_4);// 初始化485总线管理器
+
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
