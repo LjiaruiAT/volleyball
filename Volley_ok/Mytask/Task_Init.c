@@ -1,343 +1,590 @@
+#include "RMLibHead.h"
 #include "Task_Init.h"
-#include <math.h>
-#define inv_tor 0.4
-#define PI_F 3.14159265358979323846f
-#define TWO_PI_F (2.0f * PI_F)
-float unitree_F = 0;
-float unitree_S_FAR = 0;
-float unitree_S_MIDDLE = 0;
-float unitree_S_NEAR = 0;
-float unitree_T = 0;
-float real_angle = 0;
-static float twenty_to_real_pai(float angle)
-{
-	float temp = angle / 6.369426;
-	return temp;	
-}
-static float NormalizeAngleRad(float angle)
-{
-    float value = fmodf(angle, TWO_PI_F);
-    if (value < 0.0f)
-    {
-        value += TWO_PI_F;
-    }
-    return value;
-}
-
-static float GravityCompensatedTorque360(float angle_current,
-                                         float angle_down,
-                                         float torque_max)
-{
-    float diff = NormalizeAngleRad(angle_current - angle_down);
-    if (diff > PI_F)
-    {
-        diff -= TWO_PI_F;
-    }
-    else if (diff < -PI_F)
-    {
-        diff += TWO_PI_F;
-    }
-
-    return torque_max * sinf(diff);
-}
-
-typedef struct
-{
-    float exp_tor;
-    float exp_pos;
-    float exp_vel;
-    float exp_kp;
-    float exp_kd;
-} exp_param;
-
-typedef struct {
-    GO_MotorHandle_t motor; 
-    float pos_offset;         
-    float inv_motor;         
-    float exp_rad;           
-    float exp_omega;          
-    float exp_torque;         
-    float Kp;                 
-    float Kd;                
-} Joint_t;
-
-typedef enum {
-    BALL_FAR_IDLE = 0,       
-    BALL_FAR_PREPARE,        
-    BALL_FAR_HIT,            
-    BALL_FAR_RESET           
-} BallState_far_t;
-typedef enum {
-    BALL_MIDDLE_IDLE = 0,       
-    BALL_MIDDLE_PREPARE,        
-    BALL_MIDDLE_HIT,            
-    BALL_MIDDLE_RESET           
-} BallState_middle_t;
-typedef enum {
-    BALL_NEAR_IDLE = 0,       
-    BALL_NEAR_PREPARE,        
-    BALL_NEAR_HIT,            
-    BALL_NEAR_RESET           
-} BallState_near_t;
-
-RS485_t rs485bus;
-uint8_t dma1_send_buf[sizeof(GOMotor_SendPack_t)];
-uint8_t dma1_recv_buf[sizeof(GOMotor_ReceivePack_t)];
-Motor3508Ex_t Lift_Motor;
-Joint_t let_fly = {.motor = {.motor_id = 0x01, .rs485 = &rs485bus}};
+#include "can.h"
+#include "CANDrive.h"
+#include "semphr.h"
+#include "RobStride2.h"
+#include "step.h"
+ChassisMode chassis_mode = REMOTE;
+Remote_Handle_t Remote_Control;
+uint8_t usart4_dma_buff[30];
+uint8_t usart5_dma_buff[60];
+float Vx = 0;
+float Vy = 0;
+float Wz = 0;
+volatile float v1 = 0.0f;
+volatile float v2 = 0.0f;
+volatile float v3 = 0.0f;
+volatile float wheel_one = 0.0f;
+volatile float wheel_two = 0.0f;
+volatile float wheel_three = 0.0f;
+TaskHandle_t Remote_Handle;
 TaskHandle_t Hit_Task_Handle;
-float balance_rad = 0;
-float unitree_inv_back_far  = 25.00f;
-float unitree_inv_back_middle  = 20.00f;
-float unitree_inv_back_near  = 20.00f;
-float unitree_inv_front = 15.00f;
-float balance_inv = 0.0f;
+TaskHandle_t Back_Task_Handle;
+CubicParam_t cubic;
 char init_done_far = 0;
 char init_done_middle = 0;
 char init_done_near = 0;
-float max_vel = -200;
-int      ret       = 0;
-uint32_t error_cnt = 0;
-uint32_t success_cnt = 0;
-
-CubicParam_t cubic;
-TrajectoryState_t state;
-float kkp = 0;
-float kkd = 0;
-static uint8_t uart7_dma_buf[64];
-uint8_t bt_cmd = 0;
-float test_angle = 0;
-void Task_Init(void)
+char far = 0;
+char middle = 0;
+char near = 0;
+TaskHandle_t Remote_Analysis_Handle;
+Pack_TransRemote_t trans_pack;
+uint8_t recv_buff[20] = {0};
+float rocker_filter[4] = {0};
+extern SemaphoreHandle_t Remote_semaphore;  
+RobStride_t R_left;
+RobStride_t R_right;
+void Task_Init()
 {
-	vTaskDelay(1000);
-    RS485Init(&rs485bus, &huart2, NULL, NULL, dma1_send_buf, dma1_recv_buf);
 
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart7, uart7_dma_buf, sizeof(uart7_dma_buf));
-    __HAL_DMA_DISABLE_IT(huart7.hdmarx, DMA_IT_HT);
+		__HAL_UART_ENABLE_IT(&huart5, UART_IT_IDLE);
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff, sizeof(usart5_dma_buff));
+		__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	xTaskCreate(Remote,
+         "Remote",
+          400,
+          NULL,
+          4,
+          &Remote_Handle); 
+	xTaskCreate(Hit_Task,
+			 "Hit_Task",
+				258,
+				NULL,
+				4,
+				&Hit_Task_Handle); 
+    xTaskCreate(Back_Task,
+			 "Back_Task",
+				400,
+				NULL,
+				4,
+				&Back_Task_Handle); 
+						xTaskCreate(Remote_Analysis_Task, "Remote_Analysis_Task", 400, NULL, 4, &Remote_Analysis_Handle);
 
-    xTaskCreate(Hit_Task,
-                "Hit_Task",
-                400,
-                NULL,
-                4,
-                &Hit_Task_Handle);
 }
-float ini_rad = 0;
-char init_rad = 0;
-void Hit_Task(void *pvParameters)
+PackControl_t recv_pack;
+
+
+static void Key_Parse(uint32_t key, hw_key_t *out)
 {
-    TickType_t last_wake = xTaskGetTickCount();
+    out->Right_Switch_Up     = (key & KEY_Right_Switch_Up)     ? 1 : 0;
+    out->Right_Switch_Down   = (key & KEY_Right_Switch_Down)   ? 1 : 0;
 
-    BallState_far_t    ball_far_state    = BALL_FAR_IDLE;
-    BallState_middle_t ball_middle_state = BALL_MIDDLE_IDLE;
-    BallState_near_t   ball_near_state   = BALL_NEAR_IDLE;
-    TickType_t state_start_far    = last_wake;
-    TickType_t state_start_middle = last_wake;
-    TickType_t state_start_near   = last_wake;
+    out->Right_Key_Up        = (key & KEY_Right_Key_Up)        ? 1 : 0;
+    out->Right_Key_Down      = (key & KEY_Right_Key_Down)      ? 1 : 0;
+    out->Right_Key_Left      = (key & KEY_Right_Key_Left)      ? 1 : 0;
+    out->Right_Key_Right     = (key & KEY_Right_Key_Right)     ? 1 : 0;
 
-    let_fly.Kp = 4.0f;
-    let_fly.Kd = 0.2f;
-    let_fly.exp_torque = 0.4f;
+    out->Right_Broadside_Key = (key & KEY_Right_Broadside_Key) ? 1 : 0;
 
-    char rad_init_done = 0;
+    out->Left_Switch_Up      = (key & KEY_Left_Switch_Up)      ? 1 : 0;
+    out->Left_Switch_Down    = (key & KEY_Left_Switch_Down)    ? 1 : 0;
 
-    while (1)
+    out->Left_Key_Up         = (key & KEY_Left_Key_Up)         ? 1 : 0;
+    out->Left_Key_Down       = (key & KEY_Left_Key_Down)       ? 1 : 0;
+    out->Left_Key_Left       = (key & KEY_Left_Key_Left)       ? 1 : 0;
+    out->Left_Key_Right      = (key & KEY_Left_Key_Right)      ? 1 : 0;
+
+    out->Left_Broadside_Key  = (key & KEY_Left_Broadside_Key)  ? 1 : 0;
+}
+
+void Remote_Analysis()
+{
+    if(xSemaphoreTake(Remote_semaphore, pdMS_TO_TICKS(200)) == pdTRUE)
     {
-        TickType_t now = xTaskGetTickCount();
-			if(rad_init_done<=10)
-			{
+      /* 1. 保存上一帧 */
+      Remote_Control.Second = Remote_Control.First;
 			
-			
-			GoMotorSend(&let_fly.motor,
-                        let_fly.exp_torque,
-                        0,
-                        0,
-                        let_fly.Kp,
-                        let_fly.Kd);
-            ret = GoMotorRecv(&let_fly.motor);
-				            rad_init_done ++;
-				 unitree_F = let_fly.motor.state.rad;
-            unitree_S_FAR = unitree_F + unitree_inv_back_far;
-					unitree_S_MIDDLE =unitree_F +unitree_inv_back_middle;
-					unitree_S_NEAR = unitree_F + unitree_inv_back_near;
-            unitree_T = unitree_F - unitree_inv_front;
-				            ini_rad = twenty_to_real_pai(let_fly.motor.state.rad);
-Cubic_SetTrajectory(&cubic,
-																			let_fly.motor.state.rad, 0.0f,
-																			unitree_S_FAR, 0.0f,
-																			2.0f, HAL_GetTick());
+      /* 2. 解析当前按键 */
+      Key_Parse(recv_pack.Key, &Remote_Control.First);
 
-			}
-        if (init_done_far == 0 && init_done_middle == 0 && init_done_near == 0&&rad_init_done>10)
-        {
+      Remote_Control.Ex =  recv_pack.rocker[0] / REMOTE_FIGER *MAX_ROBOT_VEL;
+      Remote_Control.Ey = recv_pack.rocker[1] / REMOTE_FIGER *MAX_ROBOT_VEL;
+      Remote_Control.Eomega = recv_pack.rocker[2] / REMOTE_FIGER * MAX_ROBOT_OMEGA;
+    }else {
+      Remote_Control.Ex = 0;
+      Remote_Control.Ey = 0;
+      Remote_Control.Eomega = 0;
 
-					
-					 if(cubic.is_running)
-{
-    Cubic_GetFullState(&cubic, HAL_GetTick(), &state);
-    GoMotorSend(&let_fly.motor,
-                let_fly.exp_torque,
-                state.vel,
-                state.pos,
-                0.2f,
-                0.05f);
-    ret = GoMotorRecv(&let_fly.motor);
-}
-else
-{
-    // 保持在终点
-    GoMotorSend(&let_fly.motor,
-                let_fly.exp_torque,
-                0.0f,
-                unitree_S_FAR,
-                0.2f,
-                0.05f);
-    ret = GoMotorRecv(&let_fly.motor);
-}
-           
-        }
-
-        real_angle = twenty_to_real_pai(let_fly.motor.state.rad);
-        let_fly.exp_torque = GravityCompensatedTorque360(real_angle, ini_rad, inv_tor);
-
-        switch (ball_far_state)
-        {
-            case BALL_FAR_IDLE:
-                if (init_done_far) { state_start_far = now; ball_far_state = BALL_FAR_PREPARE; }
-                break;
-            case BALL_FAR_PREPARE:
-                if ((now - state_start_far) < pdMS_TO_TICKS(500))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_S_FAR, let_fly.Kp, let_fly.Kd);
-                else { ball_far_state = BALL_FAR_HIT; state_start_far = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_FAR_HIT:
-                if ((now - state_start_far) < pdMS_TO_TICKS(1000))
-                {
-                    if (let_fly.motor.state.rad > unitree_T)
-                        GoMotorSend(&let_fly.motor, let_fly.exp_torque, max_vel, unitree_T, 8, 0.2);
-                    else
-                        GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_T, 4, 0.1);
-                }
-                else { ball_far_state = BALL_FAR_RESET; state_start_far = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_FAR_RESET:
-                if ((now - state_start_far) < pdMS_TO_TICKS(1000))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_F, 3, 0.1f);
-                else { init_done_far = 0; ball_far_state = BALL_FAR_IDLE; GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_F, 0, 0); }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-        }
-
-        switch (ball_middle_state)
-        {
-            case BALL_MIDDLE_IDLE:
-                if (init_done_middle) { state_start_middle = now; ball_middle_state = BALL_MIDDLE_PREPARE; }
-                break;
-            case BALL_MIDDLE_PREPARE:
-                if ((now - state_start_middle) < pdMS_TO_TICKS(500))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_S_MIDDLE, 4, 0.1);
-                else { ball_middle_state = BALL_MIDDLE_HIT; state_start_middle = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_MIDDLE_HIT:
-                if ((now - state_start_middle) < pdMS_TO_TICKS(1000))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, max_vel, unitree_T, 6, 0);
-                else { ball_middle_state = BALL_MIDDLE_RESET; state_start_middle = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_MIDDLE_RESET:
-                if ((now - state_start_middle) < pdMS_TO_TICKS(1000))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_F, 3, 0.1f);
-                else { init_done_middle = 0; ball_middle_state = BALL_MIDDLE_IDLE; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-        }
-
-        switch (ball_near_state)
-        {
-            case BALL_NEAR_IDLE:
-                if (init_done_near) { state_start_near = now; ball_near_state = BALL_NEAR_PREPARE; }
-                break;
-            case BALL_NEAR_PREPARE:
-                if ((now - state_start_near) < pdMS_TO_TICKS(500))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_S_NEAR, 4, 0.1);
-                else { ball_near_state = BALL_NEAR_HIT; state_start_near = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_NEAR_HIT:
-                if ((now - state_start_near) < pdMS_TO_TICKS(1000))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, max_vel, unitree_T, 6, 0);
-                else { ball_near_state = BALL_NEAR_RESET; state_start_near = now; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-            case BALL_NEAR_RESET:
-                if ((now - state_start_near) < pdMS_TO_TICKS(1000))
-                    GoMotorSend(&let_fly.motor, let_fly.exp_torque, 0, unitree_F, 3, 0.1f);
-                else { init_done_near = 0; ball_near_state = BALL_NEAR_IDLE; }
-                ret = GoMotorRecv(&let_fly.motor);
-                break;
-        }
-
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(5));
+      memset(&Remote_Control.First, 0, sizeof(Remote_Control.First));
     }
 }
 
+void MyRecvCallback(uint8_t *src, uint16_t size, void *user_data)
+{
+    memcpy(&recv_buff, src, size);
+    memcpy(&recv_pack, recv_buff, sizeof(recv_pack));
+    xSemaphoreGive(Remote_semaphore);
+}
+CommPackRecv_Cb  recv_cb = MyRecvCallback;
+
+
+VESC_INIT vesc_1 ={
+	.steer.motor_id = 0x01,	
+	.steer.hcan = &hcan2,
+};
+VESC_INIT vesc_2 ={
+	.steer.motor_id = 0x02,
+	.steer.hcan = &hcan2,
+};
+VESC_INIT vesc_3 ={
+	.steer.motor_id = 0x03,
+	.steer.hcan = &hcan2,
+};
+uint8_t tr_buf[3] = {0xAA, 0x00, 0x55};
+int a = 1;
+void Remote(void *pvParameters)
+{
+    g_comm_handle = Comm_Init(&huart5);
+    RemoteCommInit(NULL);
+    register_comm_recv_cb(recv_cb, 0x01, &recv_pack);
+    vesc_1.PID.Kp = 0.5f;
+   	vesc_1.PID.Ki =0.002f;
+	  vesc_1.PID.Kd = 0.1f;
+    vesc_1.PID.limit = 10000.0f;
+  	vesc_1.PID.output_limit = 40.0f;
+    vesc_2.PID = vesc_1.PID;
+	  vesc_3.PID = vesc_1.PID;
+	    portTickType xLastWakeTime = xTaskGetTickCount();
+    for(;;)
+    {
+        v1 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v2 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY + Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v3 =    Remote_Control.Ex*SQRT3_OVER_2*MAX_VELOCITY + Remote_Control.Eomega*MAX_OMEGA*LENGTH;
+
+        wheel_one   = (-(v1 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
+        wheel_two   = ((v2 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
+        wheel_three = (-(v3 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
+
+        float wheel1_actual = (float)vesc_1.steer.epm / EXCHANGE_WHEEL_CONFIG;
+        float wheel2_actual = (float)vesc_2.steer.epm / EXCHANGE_WHEEL_CONFIG;
+        float wheel3_actual = (float)vesc_3.steer.epm / EXCHANGE_WHEEL_CONFIG;
+
+        PID_Control2(wheel1_actual, wheel_one, &vesc_1.PID);
+        PID_Control2(wheel2_actual, wheel_two, &vesc_2.PID);
+        PID_Control2(wheel3_actual, wheel_three, &vesc_3.PID);
+        
+        VESC_SetCurrent(&vesc_1.steer, vesc_1.PID.pid_out);
+        VESC_SetCurrent(&vesc_2.steer, vesc_2.PID.pid_out);
+        VESC_SetCurrent(&vesc_3.steer, vesc_3.PID.pid_out);
+
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Switch_Up)&&init_done_middle ==0&&init_done_near == 0)
+				{init_done_far = 1;
+				far = 1;}
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Switch_Down)&&init_done_far==0 && init_done_near ==0)
+				{ init_done_middle = 1;
+				middle = 1;}
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Right)&&init_done_middle == 0 && init_done_far == 0)
+				{init_done_near = 1;
+				near = 1;}
+        vTaskDelayUntil(&xLastWakeTime, 2);
+    }
+}
+void Remote_Analysis_Task(void *pvParameters)
+{
+
+	while(1)
+	{
+		Remote_Analysis();
+	}
+}
+int16_t feel_1 = 0;
+int16_t feel_2 = 0;
+int16_t feel_3 = 0;
+int16_t feel_4 = 0;
+
+
+IFState ALLState = READY;
+
+RobStride_Expect R_left_expect = {
+	.expect_angle = -0.355f,
+	.expect_omega = 0.0f,
+	.expect_torque = -3.7f,
+	.kp = 300.0f,
+	.kd = 8.0f
+};
+RobStride_Expect R_right_expect = {
+	.expect_angle = 0.39f,
+	.expect_omega = 0.0f,
+	.expect_torque = 3.7f,
+	.kp = 300.0f,
+	.kd = 8.0f
+};
+
+RobStride_Reset R_left_reset = {
+	.reset_angle = 0.0f,
+	.reset_omega = 0.0f,
+	.reset_torque = -2.45f,
+	.kp = 2.0f,
+	.kd = 0.0f
+};
+RobStride_Reset R_right_reset = {
+	.reset_angle = 0.0f,
+	.reset_omega = 0.0f,
+	.reset_torque = 2.45f,
+	.kp = 2.0f,
+	.kd = 0.0f
+};
+
+CubicParam_t traj_left;
+CubicParam_t traj_right;
+
+TrajectoryState_t traj_left_state;
+TrajectoryState_t traj_right_state;
+
+static uint8_t ball_back_trigger = 0;// 击球标志
+static GPIO_PinState key1, key2, key3, key4;
+float time = 0.18f;// 轨迹规划时间
+static uint8_t trigger_lock = 0; // 防止电机挡住光电门误触
+
+void Back_Task(void *pvParameters)
+{
+
+	
+	  R_left_reset.reset_angle = R_left.state.rad;
+	  R_right_reset.reset_angle = R_right.state.rad;
+	
+	TickType_t last_wake = xTaskGetTickCount();
+	for(;;)
+	{
+		key1 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
+		key2 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
+		key3 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_2);
+		key4 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3);
+		
+		if(key1 == GPIO_PIN_SET || key2 == GPIO_PIN_SET || key3 == GPIO_PIN_SET || key4 == GPIO_PIN_SET)
+		{
+			ball_back_trigger = 1;
+		}
+		
+		if(ALLState == READY && trigger_lock == 0)
+			{
+			
+			if(ball_back_trigger == 1 && trigger_lock == 0)
+				{
+					ALLState = PLAN;
+					trigger_lock = 1;
+				}
+		  }
+		
+		else if (ALLState == PLAN)
+		{
+				Cubic_SetTrajectory(
+						&traj_left,
+						R_left.state.rad,            // 当前真实角度
+						R_left.state.omega,          // 当前真实速度
+						R_left_expect.expect_angle,  // 目标角度
+						0,
+						time, 
+						xTaskGetTickCount()
+				);
+			
+				Cubic_SetTrajectory(
+						&traj_right,
+						R_right.state.rad,
+						R_right.state.omega,
+						R_right_expect.expect_angle,
+						0,
+						time,
+						xTaskGetTickCount()
+				);
+				ALLState = FIRE;
+		}
+
+		else if(ALLState == FIRE)
+		{
+		 if (traj_left.is_running || traj_right.is_running)
+		 {
+			Cubic_GetFullState(&traj_left,  xTaskGetTickCount(), &traj_left_state);
+			Cubic_GetFullState(&traj_right, xTaskGetTickCount(), &traj_right_state);
+				
+			RobStrideMotionControl(&R_left, 0x01, 
+			R_left_expect.expect_torque, 
+			traj_left_state.pos,
+			traj_left_state.vel,
+			R_left_expect.kp,
+			R_left_expect.kd);
+
+			RobStrideMotionControl(&R_right, 0x02, 
+			R_right_expect.expect_torque, 
+			traj_right_state.pos,
+			traj_right_state.vel,
+			R_right_expect.kp,
+			R_right_expect.kd);
+		 }
+			else
+			{
+			RobStrideMotionControl(&R_left, 0x01,
+			0.0f, traj_left.target_pos, 0.0f,
+			R_left_expect.kp, R_left_expect.kd);
+				
+			RobStrideMotionControl(&R_right, 0x02,
+			0.0f, traj_right.target_pos, 0.0f,
+			R_right_expect.kp, R_right_expect.kd);
+			
+			vTaskDelay(300);
+			
+			ALLState = ALIGN;
+			}
+		}
+
+		else if(ALLState == ALIGN)
+			{				
+			RobStrideMotionControl(&R_left, 0x01, 
+				R_left_reset.reset_torque, 
+				R_left_reset.reset_angle, 
+				R_left_reset.reset_omega, 
+				R_left_reset.kp, 
+				R_left_reset.kd);
+			RobStrideMotionControl(&R_right, 0x02, 
+			  R_right_reset.reset_torque, 
+				R_right_reset.reset_angle, 
+				R_right_reset.reset_omega, 
+				R_right_reset.kp, 
+				R_right_reset.kd);
+				
+		if(fabs(R_left.state.rad - R_left_reset.reset_angle) < 0.03f &&
+		   fabs(R_right.state.rad - R_right_reset.reset_angle) < 0.03f)
+				{
+					ALLState = READY;
+					trigger_lock = 0;
+					ball_back_trigger = 0;
+				}
+			}
+	 vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
+	}
+}
+
+void send_flag(uint8_t val)
+{
+    static uint8_t tx_buf[3];
+
+    tx_buf[0] = 0xAA;
+    tx_buf[1] = val;
+    tx_buf[2] = 0x55;
+
+    if (huart4.gState == HAL_UART_STATE_READY)
+    {
+        HAL_UART_Transmit_DMA(&huart4, tx_buf, sizeof(tx_buf));
+    }
+}
+float R_up_angle = 0;
+float L_up_angle = 0;
+int16_t motorCurrentBuf[4] = {0};
+Motor3508Ex_t Lift_Motor;
+TaskHandle_t Hit_Task_Handle;
+float first_angle = 0.0f;
+float second_angle = 0.0f;
+int rad_init = 0;
+typedef enum {
+    BALL_IDLE = 0,
+	  BALL_R_UP,
+    BALL_PREPARE,
+    BALL_HIT,
+    BALL_RESET
+} BallState_t;
+
+int time_prepare_far = 450; 
+
+int time_prepare_middle = 300;
+
+int time_prepare_near = 200;
+
+void BallStateMachine(BallState_t *state, char *init_done, float target_angle, float home_angle, int prepare_time, int hit_time)
+{
+    static TickType_t state_start = 0;
+    TickType_t now = xTaskGetTickCount();
+
+    switch(*state)
+    {
+        case BALL_IDLE:
+            if(*init_done)
+            {
+                state_start = now;
+                *state = BALL_R_UP;
+            }
+            break;
+        case BALL_R_UP:
+					if((now - state_start) < pdMS_TO_TICKS(1000))
+					{
+
+					}
+					else{
+						*state = BALL_PREPARE;
+						state_start = now;
+					}
+					
+        case BALL_PREPARE:
+            if ((now - state_start) < pdMS_TO_TICKS(prepare_time))
+            {
+                if(init_done_far ==1)
+							send_flag(1);
+								 if(init_done_middle ==1)
+							send_flag(2);
+								  if(init_done_near ==1)
+							send_flag(3); 
+            }
+            else
+            {
+                *state = BALL_HIT;
+                state_start = now;
+            }
+            break;
+
+        case BALL_HIT:
+            if ((now - state_start) < pdMS_TO_TICKS(hit_time))
+            {
+                PID_Control2(Lift_Motor.motor.Angle_DEG, target_angle, &Lift_Motor.pos_pid);
+                PID_Control2(Lift_Motor.motor.Speed, Lift_Motor.pos_pid.pid_out, &Lift_Motor.vel_pid);
+                motorCurrentBuf[2] = (int16_t)(Lift_Motor.vel_pid.pid_out * 1.5f);
+                MotorSend(&hcan1, 0x200, motorCurrentBuf);
+            }
+            else
+            {
+                *state = BALL_RESET;
+                state_start = now;
+            }
+            break;
+
+        case BALL_RESET:
+            if((now - state_start) < pdMS_TO_TICKS(2500))
+            {
+                PID_Control2(Lift_Motor.motor.Angle_DEG, home_angle, &Lift_Motor.pos_pid);
+                PID_Control2(Lift_Motor.motor.Speed, Lift_Motor.pos_pid.pid_out, &Lift_Motor.vel_pid);
+                motorCurrentBuf[2] = (int16_t)Lift_Motor.vel_pid.pid_out;
+                MotorSend(&hcan1, 0x200, motorCurrentBuf);
+            }
+            else
+            {
+                *init_done = 0;
+                *state = BALL_IDLE;
+            }
+            break;
+
+        default:
+            *state = BALL_IDLE;
+            break;
+    }
+}
+void Hit_Task(void *pvParameters)
+{
+    Lift_Motor.ID = 0x203;
+    Lift_Motor.hcan = &hcan1;
+
+    // PID 参数初始化
+    Lift_Motor.pos_pid.Kp = 22.1f;
+    Lift_Motor.pos_pid.Ki = 0.0f;
+    Lift_Motor.pos_pid.Kd = 0.0f;
+    Lift_Motor.pos_pid.limit = 10000.0f;
+    Lift_Motor.pos_pid.output_limit = 9006.3f;
+
+    Lift_Motor.vel_pid.Kp = 8.0f;
+    Lift_Motor.vel_pid.Ki = 0.01f;
+    Lift_Motor.vel_pid.Kd = 0.0f;
+    Lift_Motor.vel_pid.limit = 10000.0f;
+    Lift_Motor.vel_pid.output_limit = 16384.0f;
+
+    TickType_t last_wake = xTaskGetTickCount();
+
+    BallState_t far_state = BALL_IDLE;
+    BallState_t middle_state = BALL_IDLE;
+    BallState_t near_state = BALL_IDLE;
+
+    while(1)
+    {
+			if (rad_init<100) { 
+			first_angle = Lift_Motor.motor.Angle_DEG; 
+			second_angle = first_angle + MOTOR_ANGLE_OFFSET_DEG; 
+			rad_init++; 
+			char flag = 0; 
+			flag =1; 
+			}
+        BallStateMachine(&far_state, &init_done_far, second_angle, first_angle, time_prepare_far, UP_VOLLEY_MOTOR_MS);
+        BallStateMachine(&middle_state, &init_done_middle, second_angle, first_angle, time_prepare_middle, UP_VOLLEY_MOTOR_MS);
+        BallStateMachine(&near_state, &init_done_near, second_angle, first_angle, time_prepare_near, UP_VOLLEY_MOTOR_MS);
+  
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
+    }
+}
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	if(hcan->Instance ==CAN1)
+	{
+
+
+		uint8_t Recv[8] = {0};
+
+    if (hcan->Instance == CAN1)
+    {
+			
+	uint32_t ID = CAN_Receive_DataFrame(&hcan1, Recv);
+//if(ID == 0x01) {
+    RobStrideRecv_Handle(&R_left, &hcan1, ID, Recv);
+//} else if(ID == 0x02) {
+    RobStrideRecv_Handle(&R_right, &hcan1, ID, Recv);
+//}
+//else if(ID == 0x203)
+//		{
+	int c =		Motor3508Recv(&Lift_Motor,hcan, ID, Recv);
+//		}
+			}
+}
+	}
+void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	uint8_t Recv[8] = {0};
+	uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
+VESC_ReceiveHandler(&vesc_1.steer, &hcan2, ID,Recv);
+	VESC_ReceiveHandler(&vesc_2.steer, &hcan2, ID,Recv);
+VESC_ReceiveHandler(&vesc_3.steer, &hcan2, ID,Recv);
+}
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART2)
+    if(huart->Instance == UART4)
     {
-        RS485SendIRQ_Handler(&rs485bus, huart);
     }
 }
+
+
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
-    if (huart->Instance == UART7)
-    {
-        if (size >= 3 &&
-            uart7_dma_buf[0]        == 0xAA &&
-            uart7_dma_buf[size - 1] == 0x55)
-        {
-            bt_cmd = uart7_dma_buf[1];
-            if (bt_cmd == 0x01)
-            {
-                init_done_far = 1;
-            }
-						 if (bt_cmd == 0x02)
-            {
-                init_done_middle = 1;
-            }
-						 if (bt_cmd == 0x03)
-            {
-                init_done_near = 1;
-            }
-        }
-        HAL_UARTEx_ReceiveToIdle_DMA(&huart7, uart7_dma_buf, sizeof(uart7_dma_buf));
-        __HAL_DMA_DISABLE_IT(huart7.hdmarx, DMA_IT_HT);
-    }
-    if (huart->Instance == USART2)
-    {
-        RS485RecvIRQ_Handler(&rs485bus, huart, size);
-    }
+	if (huart->Instance == UART5)
+	{
+		HAL_UART_DMAStop(&huart5);
+		Comm_UART_IRQ_Handle(g_comm_handle, &huart5, usart5_dma_buff,size);
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff,sizeof(usart5_dma_buff));
+   	__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	}
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART2)
-    {
-        __HAL_UART_CLEAR_FLAG(huart,
-                              UART_CLEAR_OREF |
-                              UART_CLEAR_FEF  |
-                              UART_CLEAR_NEF  |
-                              UART_CLEAR_PEF);
-        __HAL_UART_SEND_REQ(huart, UART_RXDATA_FLUSH_REQUEST);
-        error_cnt++;
-    }
-    if (huart->Instance == UART7)
-    {
-        HAL_UARTEx_ReceiveToIdle_DMA(&huart7, uart7_dma_buf, sizeof(uart7_dma_buf));
-        __HAL_DMA_DISABLE_IT(huart7.hdmarx, DMA_IT_HT);
-    }
+	if (huart->Instance == UART5)
+	{
+		HAL_UART_DMAStop(huart);
+		// 重置HAL状态
+		huart->ErrorCode = HAL_UART_ERROR_NONE;
+		huart->RxState = HAL_UART_STATE_READY;
+		huart->gState = HAL_UART_STATE_READY;
+		
+		// 然后清除错误标志 - 按照STM32F4参考手册要求的顺序
+		uint32_t isrflags = READ_REG(huart->Instance->SR);
+		
+		// 按顺序处理各种错误标志，必须先读SR再读DR来清除错误
+		if (isrflags & (USART_SR_ORE | USART_SR_NE | USART_SR_FE)) 
+		{
+				// 对于ORE、NE、FE错误，需要先读SR再读DR
+				volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
+				volatile uint32_t temp_dr = READ_REG(huart->Instance->DR); // 这个读取会清除ORE、NE、FE        
+
+		if (isrflags & USART_SR_PE)
+		{
+				volatile uint32_t temp_sr = READ_REG(huart->Instance->SR);
+		}
+	}
+		Comm_UART_IRQ_Handle(g_comm_handle, &huart5, usart5_dma_buff, 0);
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff,sizeof(usart5_dma_buff));
+		__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	}
 }
