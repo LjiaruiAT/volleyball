@@ -1,0 +1,486 @@
+#include "PID.h"
+#include "math.h"
+
+/******************************** ERROR PID **********************************/
+void PID_EREOR_Init(PID_EREOR_TypeDef *pid, float kp, float ki, float kd,
+              float max_out, float max_iout, float deadband, float d_filter) {
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+    pid->max_out = max_out;
+    pid->max_iout = max_iout;
+    pid->deadband = deadband;
+    pid->d_filter = d_filter;
+
+    pid->err = 0;
+    pid->err_last = 0;
+    pid->err_sum = 0;
+    pid->d_last = 0;
+    pid->output = 0;
+}
+
+float PID_EREOR_Calculate(PID_EREOR_TypeDef *pid, float error) {
+    pid->err = error;
+
+    // === 死区控制 ===
+    if (fabsf(pid->err) < pid->deadband) {
+        pid->err = 0;
+        pid->err_sum = 0;  // 可选：清除积分
+        pid->output = 0;
+        return 0;
+    }
+
+    // === 微分项计算（带滤波） ===
+    float derivative = (pid->err - pid->err_last);
+    derivative = pid->d_last + pid->d_filter * (derivative - pid->d_last);  // 滤波
+    pid->d_last = derivative;
+
+    // === 抗积分风up（仅在输出未饱和时积分） ===
+    float temp_output = pid->kp * pid->err + pid->ki * pid->err_sum + pid->kd * derivative;
+
+    if (fabsf(temp_output) < pid->max_out) {
+        pid->err_sum += pid->err;
+        // 积分限幅
+        if (pid->err_sum > pid->max_iout) pid->err_sum = pid->max_iout;
+        if (pid->err_sum < -pid->max_iout) pid->err_sum = -pid->max_iout;
+    }
+
+    // === 最终 PID 输出 ===
+    pid->output = pid->kp * pid->err + pid->ki * pid->err_sum + pid->kd * derivative;
+
+    // 输出限幅
+    if (pid->output > pid->max_out) pid->output = pid->max_out;
+    if (pid->output < -pid->max_out) pid->output = -pid->max_out;
+
+    // 更新误差
+    pid->err_last = pid->err;
+
+    return pid->output;
+}
+
+
+/***************************PID param initialize******************************/
+static void f_PID_param_init(
+    PID_TypeDef *pid,
+    uint16_t max_out,
+    uint16_t intergral_limit,
+    float deadband,
+
+    float kp,
+    float Ki,
+    float Kd,
+
+    float Changing_Integral_A,
+    float Changing_Integral_B,
+
+    float output_filtering_coefficient,
+    float derivative_filtering_coefficient,
+
+    uint8_t improve)
+{
+    pid->DeadBand = deadband;
+    pid->IntegralLimit = intergral_limit;
+    pid->MaxOut = max_out;
+    pid->Target = 0;
+
+    pid->Kp = kp;
+    pid->Ki = Ki;
+    pid->Kd = Kd;
+    pid->ITerm = 0;
+
+    pid->ScalarA = Changing_Integral_A;
+    pid->ScalarB = Changing_Integral_B;
+
+    pid->Output_Filtering_Coefficient = output_filtering_coefficient;
+
+    pid->Derivative_Filtering_Coefficient = derivative_filtering_coefficient;
+
+    pid->Improve = improve;
+
+    pid->ERRORHandler.ERRORCount = 0;
+    pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
+
+    pid->Output = 0;
+}
+/**************************PID param reset*********************************/
+static void f_PID_reset(PID_TypeDef *pid, float Kp, float Ki, float Kd)
+{
+    pid->Kp = Kp;
+    pid->Ki = Ki;
+    pid->Kd = Kd;
+
+    if (pid->Ki == 0)
+		pid->Iout = 0;
+}
+/*****************PID structure initialize*********************/
+void PID_Init(
+    PID_TypeDef *pid,
+
+    float kp,
+    float Ki,
+    float Kd,
+		
+    uint16_t intergral_limit,
+    float deadband,
+    uint16_t max_out,
+
+    float A,
+    float B,
+
+    float output_filtering_coefficient,
+    float derivative_filtering_coefficient,
+    uint8_t improve)
+{
+    pid->PID_param_init = f_PID_param_init;
+    pid->PID_reset 		= f_PID_reset;
+    pid->PID_param_init(pid, max_out, intergral_limit, deadband,
+                        kp, Ki, Kd, A, B, output_filtering_coefficient, derivative_filtering_coefficient, improve);
+}
+
+/***************************PID calculate**********************************/
+float PID_Calculate(float measure, float target, PID_TypeDef *pid)
+{
+/*    if (pid->Improve & ErrorHandle) //ErrorHandle
+    {
+        f_PID_ErrorHandle(pid); // last_xxx = xxx
+        if (pid->ERRORHandler.ERRORType != PID_ERROR_NONE)
+        {
+            pid->Output = 0;
+            return 0; //Catch ERROR
+        }
+    }
+*/
+    pid->Measure = measure;
+    pid->Target = target;
+    pid->Err = pid->Target - pid->Measure;
+
+    if (ABS(pid->Err) > pid->DeadBand)
+    {
+        pid->Pout = pid->Kp * pid->Err;
+        pid->Dout = pid->Kd * (pid->Err - pid->Last_Err);
+        pid->ITerm = pid->Ki * pid->Err;
+
+        if (pid->Improve & Derivative_On_Measurement) //Derivative On Measurement
+			pid->Dout = pid->Kd * (pid->Last_Measure - pid->Measure);
+		
+        if (pid->Improve & DerivativeFilter) //Derivative filter
+			pid->Dout = pid->Dout * pid->Derivative_Filtering_Coefficient+ pid->Last_Dout * (1 - pid->Derivative_Filtering_Coefficient);
+    
+        if (pid->Improve & Trapezoid_Intergral) //Trapezoid Intergral
+        pid->ITerm = pid->Ki * ((pid->Err + pid->Last_Err) / 2);
+
+        if (pid->Improve & ChangingIntegralRate){ //Changing Integral Rate
+            if ((pid->Err * pid->Iout > 0) && (ABS(pid->Err) > pid->ScalarB))
+            {   //Integral still increasing
+                if (ABS(pid->Err) <= (pid->ScalarA + pid->ScalarB))
+                    pid->ITerm *= (pid->ScalarA - ABS(pid->Err) + pid->ScalarB) / pid->ScalarA;
+                else
+                    pid->ITerm = 0;
+            }
+        }
+
+        if (pid->Improve & Integral_Limit){ //Integral limit
+            float temp_Output, temp_Iout;
+            temp_Iout = pid->Iout + pid->ITerm;
+            temp_Output = pid->Pout + pid->Iout + pid->Dout;
+            if ((ABS(temp_Output) > pid->MaxOut) && (pid->Err * pid->Iout > 0))//Integral still increasing
+                pid->ITerm = 0;
+            
+            if (temp_Iout > pid->IntegralLimit){
+                pid->ITerm = 0;
+                pid->Iout = pid->IntegralLimit;
+            }
+            if (temp_Iout < -pid->IntegralLimit){
+                pid->ITerm = 0;
+                pid->Iout = -pid->IntegralLimit;
+            }
+        }
+        
+        pid->Iout += pid->ITerm;
+	    pid->Output = pid->Pout + pid->Iout + pid->Dout;
+    }
+    else   pid->Output = 0;
+
+	if (pid->Improve & OutputFilter) //Output Filter
+		pid->Output = pid->Output * pid->Output_Filtering_Coefficient + pid->Last_Output * (1 - pid->Output_Filtering_Coefficient);
+
+    limit(pid->Output,pid->MaxOut,-(pid->MaxOut));
+
+    pid->Last_Measure = pid->Measure;
+    pid->Last_Output = pid->Output;
+    pid->Last_Dout = pid->Dout;
+    pid->Last_Err = pid->Err;
+
+    return pid->Output;
+}
+float PID_Control_Increment(float measure, float target,PID_TypeDef *pid) {
+	pid->Measure = measure;
+    pid->Target = target;
+    pid->Err = pid->Target - pid->Measure;
+
+    if (ABS(pid->Err) > pid->DeadBand)
+    {
+        pid->Pout = pid->Kp * pid->Err - pid->Last_Err;
+        pid->ITerm = pid->Ki * pid->Err;
+        pid->Dout = pid->Kd * (pid->Err - 2 * pid->Last_Err + pid->Before_Last_Err);
+
+       
+        if (pid->Improve & Integral_Limit){ //Integral limit
+			float temp_Output = pid->Pout + pid->Iout + pid->Dout, temp_Iout = pid->ITerm;
+			if (ABS(temp_Output) > pid->MaxOut)
+				if (pid->Err * pid->Iout > 0)	pid->ITerm = 0;//Integral still increasing
+			if (temp_Iout > pid->IntegralLimit){
+				pid->ITerm = 0;
+				pid->Iout = pid->IntegralLimit;
+			}
+			if (temp_Iout < -pid->IntegralLimit){
+				pid->ITerm = 0;
+				pid->Iout = -pid->IntegralLimit;
+			}
+		}
+
+        if (pid->Improve & DerivativeFilter) //Derivative filter
+			pid->Dout = pid->Dout * pid->Derivative_Filtering_Coefficient+ pid->Last_Dout * (1 - pid->Derivative_Filtering_Coefficient);
+
+        pid->Iout = pid->ITerm;
+
+        pid->Output = pid->Pout + pid->Iout + pid->Dout;
+
+        
+        if (pid->Improve & OutputFilter) //Output Filter
+			pid->Output = pid->Output * pid->Output_Filtering_Coefficient + pid->Last_Output * (1 - pid->Output_Filtering_Coefficient);
+
+		if (pid->Output > pid->MaxOut)
+			pid->Output = pid->MaxOut;
+		if (pid->Output < -(pid->MaxOut))
+			pid->Output = -(pid->MaxOut);
+    }
+    pid->Last_Measure = pid->Measure;
+    pid->Last_Output = pid->Output;
+    pid->Last_Dout = pid->Dout;
+    pid->Last_Err = pid->Err;
+    pid->Before_Last_Err = pid->Last_Err;
+
+    return pid->Output;	
+}
+float PID_Control_Smis(float measure, float target,PID_TypeDef *pid, float speed) {
+	pid->Measure = measure;
+    pid->Target = target;
+    pid->Err = pid->Target - pid->Measure;
+
+    if (ABS(pid->Err) > pid->DeadBand)
+    {
+        pid->Pout = pid->Kp * pid->Err;
+        pid->Dout = pid->Kd * speed;
+		
+        if (pid->Improve & DerivativeFilter) //Derivative filter
+			pid->Dout = pid->Dout * pid->Derivative_Filtering_Coefficient+ pid->Last_Dout * (1 - pid->Derivative_Filtering_Coefficient);
+
+    }
+	pid->ITerm = pid->Ki * pid->Err;
+
+	if (pid->Improve & Trapezoid_Intergral) //Trapezoid Intergral
+		pid->ITerm = pid->Ki * ((pid->Err + pid->Last_Err) / 2);
+       
+	if (pid->Improve & ChangingIntegralRate){ //Changing Integral Rate
+		if ((pid->Err * pid->Iout > 0) && (ABS(pid->Err) > pid->ScalarB))
+		{	//Integral still increasing
+			if (ABS(pid->Err) <= (pid->ScalarA + pid->ScalarB))
+				pid->ITerm *= (pid->ScalarA - ABS(pid->Err) + pid->ScalarB) / pid->ScalarA;
+			else
+				pid->ITerm = 0;
+		}
+	}
+	if (pid->Improve & Integral_Limit){ //Integral limit
+		float temp_Output, temp_Iout;
+		temp_Iout = pid->Iout + pid->ITerm;
+		temp_Output = pid->Pout + pid->Iout + pid->Dout;
+		if ((ABS(temp_Output) > pid->MaxOut) && (pid->Err * pid->Iout > 0))//Integral still increasing
+			pid->ITerm = 0;
+
+		if (temp_Iout > pid->IntegralLimit)
+		{
+			pid->ITerm = 0;
+			pid->Iout = pid->IntegralLimit;
+		}
+		if (temp_Iout < -pid->IntegralLimit)
+		{
+			pid->ITerm = 0;
+			pid->Iout = -pid->IntegralLimit;
+		}
+	}
+
+	pid->Iout += pid->ITerm;
+
+	
+	pid->Output = pid->Pout + pid->Iout + pid->Dout;
+   
+	
+	if (pid->Improve & OutputFilter) //Output Filter
+		pid->Output = pid->Output * pid->Output_Filtering_Coefficient + pid->Last_Output * (1 - pid->Output_Filtering_Coefficient);
+
+	if (pid->Output > pid->MaxOut)
+		pid->Output = pid->MaxOut;
+	if (pid->Output < -(pid->MaxOut))
+		pid->Output = -(pid->MaxOut);
+
+    pid->Last_Measure = pid->Measure;
+    pid->Last_Output = pid->Output;
+    pid->Last_Dout = pid->Dout;
+    pid->Last_Err = pid->Err;
+
+    return pid->Output;
+}
+
+/*****************PID ERRORHandle Function*******************/  /*
+static void f_PID_ErrorHandle(PID_TypeDef *pid)
+{
+    //Motor Blocked Handle
+    if (pid->Output < pid->MaxOut * 0.01f)
+        return;
+
+    if ((ABS(pid->Target - pid->Measure) / pid->Target) > 0.9f)
+    {
+        //Motor blocked counting
+        pid->ERRORHandler.ERRORCount++;
+    }
+    else
+    {
+        pid->ERRORHandler.ERRORCount = 0;
+    }
+
+    if (pid->ERRORHandler.ERRORCount > 1000)
+    {
+        //Motor blocked over 1000times
+        pid->ERRORHandler.ERRORType = Motor_Blocked;
+    }
+}*/
+
+
+
+/******************************** FUZZY PID **********************************/
+static float FuzzyRuleKpRAW[7][7] = {
+    PB, PB, PM, PM, PB, PB, PM,
+    PB, PM, PS, PS, PM, PM, PS,
+    PM, PS, PS, ZE, PS, PS, ZE,
+    PS, ZE, ZE, NM, ZE, ZE, PS,
+    ZE, PS, PS, ZE, PS, PS, PM,
+    PS, PM, PM, PS, PS, PM, PB,
+    PM, PB, PB, PM, PM, PB, PB};
+
+static float FuzzyRuleKiRAW[7][7] = {
+    NB, NM, NS, NM, NM, NM, ZE,
+    NM, ZE, PS, ZE, NS, ZE, PS,
+    ZE, PM, PM, PM, PS, PM, PB,
+    PB, PB, PB, PB, PB, PB, PB,
+    PB, PM, PS, PM, PM, PM, ZE,
+    PM, ZE, NS, ZE, PS, ZE, NM,
+    ZE, NM, NM, NM, NS, NM, NB};
+
+static float FuzzyRuleKdRAW[7][7] = {
+    PB, PM, PS, NB, NB, NM, PS,
+    PM, PS, ZE, NM, NM, NS, ZE,
+    PS, ZE, ZE, NM, NS, NS, ZE,
+    PS, ZE, NS, NS, NS, ZE, PS,
+    ZE, ZE, ZE, ZE, ZE, ZE, ZE,
+    PS, ZE, PS, PS, PS, PS, PM,
+    PS, PS, PM, PM, PM, PM, PB};
+
+
+void Fuzzy_Rule_Init(float kpMax, float kiMax, float kdMax, float integralLimit, float eStep, uint16_t max_out, FuzzyRule_t *fuzzyRule)
+{
+    fuzzyRule->KpMax = kpMax;
+    fuzzyRule->KiMax = kiMax;
+    fuzzyRule->KdMax = kdMax;
+    fuzzyRule->IntegralLimit = integralLimit;
+    fuzzyRule->max_out = max_out;
+    
+    fuzzyRule->KpRatio = 0;
+    fuzzyRule->KiRatio = 0;
+    fuzzyRule->KdRatio = 0;
+
+    if (eStep < 0.00001f)
+        eStep = 1;
+    fuzzyRule->eStep = eStep;
+    fuzzyRule->ecStep = eStep * 1.5f;
+}
+float Fuzzy_Rule_Implementation(float measure, float target, FuzzyRule_t *fuzzyRule)
+{
+    float eLeftTemp, ecLeftTemp;
+    float eRightTemp, ecRightTemp;
+    uint8_t eLeftIndex, ecLeftIndex;
+    uint8_t eRightIndex, ecRightIndex;
+
+    fuzzyRule->e = target - measure;
+    float dt = DWT_GetDeltaT((void *)&fuzzyRule->Fuzzy_DWT_CNT);
+    fuzzyRule->ec = (fuzzyRule->e - fuzzyRule->eLast)/dt;
+    fuzzyRule->eLast = fuzzyRule->e;    
+
+    //隶属区间
+    eLeftIndex   = fuzzyRule->e  >= fuzzyRule->eStep  ? 6 : (fuzzyRule->e  <= -fuzzyRule->eStep  ? 0 : (fuzzyRule->e  >= 0 ? ((int)(fuzzyRule->e  / (fuzzyRule->eStep  / 3)) + 3) : ((int)(fuzzyRule->e  / (fuzzyRule->eStep  / 3)) + 2)));
+    eRightIndex  = fuzzyRule->e  >= fuzzyRule->eStep  ? 6 : (fuzzyRule->e  <= -fuzzyRule->eStep  ? 0 : (fuzzyRule->e  >= 0 ? ((int)(fuzzyRule->e  / (fuzzyRule->eStep  / 3)) + 4) : ((int)(fuzzyRule->e  / (fuzzyRule->eStep  / 3)) + 3)));
+    ecLeftIndex  = fuzzyRule->ec >= fuzzyRule->ecStep ? 6 : (fuzzyRule->ec <= -fuzzyRule->ecStep ? 0 : (fuzzyRule->ec >= 0 ? ((int)(fuzzyRule->ec / (fuzzyRule->ecStep / 3)) + 3) : ((int)(fuzzyRule->ec / (fuzzyRule->ecStep / 3)) + 2)));
+    ecRightIndex = fuzzyRule->ec >= fuzzyRule->ecStep ? 6 : (fuzzyRule->ec <= -fuzzyRule->ecStep ? 0 : (fuzzyRule->ec >= 0 ? ((int)(fuzzyRule->ec / (fuzzyRule->ecStep / 3)) + 4) : ((int)(fuzzyRule->ec / (fuzzyRule->ecStep / 3)) + 3)));
+
+    //隶属度
+    eLeftTemp   = eLeftIndex   == 6 ? 0 : (eLeftIndex   == 0 ? 1 : (eRightIndex - fuzzyRule->e / (fuzzyRule->eStep / 3) - 3));
+    eRightTemp  = eRightIndex  == 6 ? 1 : (eRightIndex  == 0 ? 0 : (fuzzyRule->e / (fuzzyRule->eStep / 3) - eLeftIndex + 3));
+    ecLeftTemp  = ecLeftIndex  == 6 ? 0 : (ecLeftIndex  == 0 ? 1 : (ecRightIndex - fuzzyRule->ec / (fuzzyRule->ecStep / 3) - 3));
+    ecRightTemp = ecRightIndex == 6 ? 1 : (ecRightIndex == 0 ? 0 : (fuzzyRule->ec / (fuzzyRule->ecStep / 3) - ecLeftIndex + 3));
+
+    fuzzyRule->KpFuzzy = eLeftTemp  * ecLeftTemp  * FuzzyRuleKpRAW[eLeftIndex ][ecLeftIndex ]+
+                         eLeftTemp  * ecRightTemp * FuzzyRuleKpRAW[eRightIndex][ecLeftIndex ]+
+                         eRightTemp * ecLeftTemp  * FuzzyRuleKpRAW[eLeftIndex ][ecRightIndex]+
+                         eRightTemp * ecRightTemp * FuzzyRuleKpRAW[eRightIndex][ecRightIndex];
+
+    fuzzyRule->KiFuzzy = eLeftTemp  * ecLeftTemp  * FuzzyRuleKiRAW[eLeftIndex ][ecLeftIndex ]+
+                         eLeftTemp  * ecRightTemp * FuzzyRuleKiRAW[eRightIndex][ecLeftIndex ]+
+                         eRightTemp * ecLeftTemp  * FuzzyRuleKiRAW[eLeftIndex ][ecRightIndex]+
+                         eRightTemp * ecRightTemp * FuzzyRuleKiRAW[eRightIndex][ecRightIndex];
+
+    fuzzyRule->KdFuzzy = eLeftTemp  * ecLeftTemp  * FuzzyRuleKdRAW[eLeftIndex ][ecLeftIndex ]+
+                         eLeftTemp  * ecRightTemp * FuzzyRuleKdRAW[eRightIndex][ecLeftIndex ]+
+                         eRightTemp * ecLeftTemp  * FuzzyRuleKdRAW[eLeftIndex ][ecRightIndex]+
+                         eRightTemp * ecRightTemp * FuzzyRuleKdRAW[eRightIndex][ecRightIndex];
+                         
+    fuzzyRule->KpRatio = fuzzyRule->KpMax * (fuzzyRule->KpFuzzy + 3) / 6;
+    fuzzyRule->KiRatio = fuzzyRule->KiMax * (fuzzyRule->KiFuzzy + 3) / 6;
+    fuzzyRule->KdRatio = fuzzyRule->KdMax * (fuzzyRule->KdFuzzy + 3) / 6;
+
+    fuzzyRule->integral += fuzzyRule->KiRatio * fuzzyRule->e * dt;
+    limit(fuzzyRule->integral, fuzzyRule->IntegralLimit, -fuzzyRule->IntegralLimit);
+    
+    fuzzyRule->Output = fuzzyRule->KpRatio * fuzzyRule->e + fuzzyRule->integral + fuzzyRule->KdRatio * fuzzyRule->ec;
+    limit(fuzzyRule->Output, fuzzyRule->max_out, -fuzzyRule->max_out);
+    
+    return fuzzyRule->Output;        
+}
+/******************************** PI **********************************/
+float PI_Control(float current, float expected, PI_t *parameter)
+{
+	parameter->error_last = parameter->error_now;
+    parameter->error_now = expected - current;
+    parameter->error_inter += parameter->error_now;
+
+    if (parameter->error_inter > parameter->limit)
+        parameter->error_inter = parameter->limit;
+    if (parameter->error_inter < -parameter->limit)
+        parameter->error_inter = -parameter->limit;
+    parameter->pid_out = parameter->Kp * parameter->error_now + parameter->Ki * parameter->error_inter;
+    
+	limit(parameter ->pid_out,16384,-16384);
+	return parameter ->pid_out ;
+}
+
+void PI_Init(float Kp,float Ki,float limit,PI_t *pi)
+{
+	pi->Kp=Kp;
+	pi->Ki=Ki;
+	pi->limit=limit;
+}
+//float Inverse_quantization(float maximum, float minimum, float qvalues)
+//{
+//	float x = (maximum - minimum) * (qvalues + 3) / 6 + minimum;
+//	return x;
+//}
+
