@@ -91,59 +91,54 @@ static void Key_Parse(uint32_t key, hw_key_t *out)
 }
 /* ---- USB radar globals ---- */
 float radar_dx = 0, radar_dy = 0, radar_d = 999.0f;
+float remote_Ex = 0, remote_Ey = 0, remote_Eomega = 0;
+float vx,vy,vz = 0;
+  void Remote_Analysis(void)
+  {
+      /* 1. USB lazy init */
+      extern USBD_HandleTypeDef hUsbDeviceFS;
+      int usb_ready = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED);
+      if (usb_ready && g_usb_data_sem == NULL) {
+          UsbReceiver_Init();
+      }
 
-void Remote_Analysis(void)
-{
-    /* 1. USB detection + lazy init */
-    extern USBD_HandleTypeDef hUsbDeviceFS;
-    int usb_ready = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED);
+      /* 2. 雷达数据（非阻塞） */
+      if (usb_ready && xSemaphoreTake(g_usb_data_sem, 0) == pdTRUE) {
+          radar_dx = g_usb_data.x2;
+          radar_dy = g_usb_data.y2;
+				  vx       = g_usb_data.vx;
+		      vy       = g_usb_data.vy;
+				  vz       = g_usb_data.vz;
+          radar_d  = sqrtf(radar_dx * radar_dx + radar_dy * radar_dy);
+      } else if (!usb_ready) {
+          radar_d = 999.0f;
+      }
 
-    if (usb_ready && g_usb_data_sem == NULL) {
-        UsbReceiver_Init();
-    }
+      /* 3. 遥控数据（非阻塞，始终读，不管什么模式） */
+      if (xSemaphoreTake(Remote_semaphore, 0) == pdTRUE) {
+          Remote_Control.Second = Remote_Control.First;
+          Key_Parse(recv_pack.Key, &Remote_Control.First);
+          remote_Ex     = recv_pack.rocker[0] / REMOTE_FIGER * MAX_ROBOT_VEL;
+          remote_Ey     = recv_pack.rocker[1] / REMOTE_FIGER * MAX_ROBOT_VEL;
+          remote_Eomega = recv_pack.rocker[2] / REMOTE_FIGER * MAX_ROBOT_OMEGA;
+      }
 
-    /* 2. Read radar data (USB connected only) */
-    if (usb_ready) {
-        if (xSemaphoreTake(g_usb_data_sem, 0) == pdTRUE) {
-            radar_dx = g_usb_data.x;
-            radar_dy = g_usb_data.y;
-            radar_d  = sqrtf(radar_dx * radar_dx + radar_dy * radar_dy);
-        }
-    } else {
-        radar_d = 999.0f;
-    }
+      /* 4. 二选一输出 */
+      if (radar_d <= 1.5f) {
+          chassis_mode = AUTO;
+          float Kp = 4.0f;
+          Remote_Control.Ex     = Kp * (radar_dx - 0.0f);
+          Remote_Control.Ey     = Kp * (radar_dy - 0.0f);
+          Remote_Control.Eomega = remote_Eomega;
+      } else {
+          chassis_mode = REMOTE;
+          Remote_Control.Ex     = remote_Ex;
+          Remote_Control.Ey     = remote_Ey;
+          Remote_Control.Eomega = remote_Eomega;
+      }
 
-    /* 3. Mode: inside 3x3m -> AUTO, else -> REMOTE */
-    if (radar_d <= 1.5f) {
-        chassis_mode = AUTO;
-        float Kp = 2.0f;
-        Remote_Control.Ex     = Kp * (radar_dx - 0.4f);
-        Remote_Control.Ey     = Kp * (radar_dy - 0.0f);
-        Remote_Control.Eomega = 0.0f;
-        vTaskDelay(pdMS_TO_TICKS(10));
-        return;
-    }
-
-    /* 4. REMOTE mode */
-    chassis_mode = REMOTE;
-    if (xSemaphoreTake(Remote_semaphore, pdMS_TO_TICKS(200)) == pdTRUE)
-    {
-        Remote_Control.Second = Remote_Control.First;
-        Key_Parse(recv_pack.Key, &Remote_Control.First);
-
-        Remote_Control.Ex     = recv_pack.rocker[0] / REMOTE_FIGER * MAX_ROBOT_VEL;
-        Remote_Control.Ey     = recv_pack.rocker[1] / REMOTE_FIGER * MAX_ROBOT_VEL;
-        Remote_Control.Eomega = recv_pack.rocker[2] / REMOTE_FIGER * MAX_ROBOT_OMEGA;
-    }
-    else
-    {
-        Remote_Control.Ex = 0;
-        Remote_Control.Ey = 0;
-        Remote_Control.Eomega = 0;
-        memset(&Remote_Control.First, 0, sizeof(Remote_Control.First));
-    }
-}
-
+      vTaskDelay(pdMS_TO_TICKS(10));
+  }
 void MyRecvCallback(uint8_t *src, uint16_t size, void *user_data)
 {
     memcpy(&recv_buff, src, size);
@@ -183,7 +178,7 @@ void Remote(void *pvParameters)
     for(;;)
     {
         v1 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
-        v2 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v2 = +Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
         v3 =    Remote_Control.Ex*SQRT3_OVER_2*MAX_VELOCITY - Remote_Control.Eomega*MAX_OMEGA*LENGTH;
 
         wheel_one   = (-(v1 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
@@ -202,17 +197,7 @@ void Remote(void *pvParameters)
         VESC_SetCurrent(&vesc_2.steer, vesc_2.PID.pid_out);
         VESC_SetCurrent(&vesc_3.steer, vesc_3.PID.pid_out);
 
-        /* AUTO mode: auto-select near/middle/far by ball distance */
-        if (chassis_mode == AUTO) {
-            if (radar_d < 0.3f && init_done_middle == 0 && init_done_far == 0)
-                { init_done_near = 1; near = 1; }
-            else if (radar_d >= 0.3f && radar_d < 0.8f && init_done_near == 0 && init_done_far == 0)
-                { init_done_middle = 1; middle = 1; }
-            else if (radar_d >= 0.8f && init_done_near == 0 && init_done_middle == 0)
-                { init_done_far = 1; far = 1; }
-        }
-        /* REMOTE mode: manual button */
-        if (chassis_mode == REMOTE) {
+
             if (KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Switch_Up)&&init_done_middle ==0&&init_done_near == 0)
                 {init_done_far = 1;
                 far = 1;}
@@ -224,9 +209,8 @@ void Remote(void *pvParameters)
                 near = 1;}
             if (KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Left_Key_Up)&&init_done_middle == 0 && init_done_far == 0&& init_done_near ==0)
                 {send_flag(4);
-									chassis_mode = REMOTE;
                 }
-        }
+        
         vTaskDelayUntil(&xLastWakeTime, 2);
     }
 }
