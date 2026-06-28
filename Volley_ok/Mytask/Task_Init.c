@@ -9,6 +9,19 @@ ChassisMode chassis_mode = REMOTE;
 Remote_Handle_t Remote_Control;
 uint8_t usart4_dma_buff[30];
 uint8_t usart5_dma_buff[60];
+uint8_t usart6_dma_buff[30];
+
+/* 陀螺仪校正变量 */
+float Wz_correction = 0.0f;
+float gyro_slip_val = 0.0f;
+uint8_t slip_flag = 0;
+PID2 JY61_adjust = {
+    .Kp = 0.8f,
+    .Ki = 0.0008f,
+    .Kd = 0.35f,
+    .limit = 8000.0f,
+    .output_limit = 60.0f
+};
 float Vx = 0;
 float Vy = 0;
 float Wz = 0;
@@ -32,39 +45,59 @@ TaskHandle_t Remote_Analysis_Handle;
 Pack_TransRemote_t trans_pack;
 uint8_t recv_buff[20] = {0};
 float rocker_filter[4] = {0};
-extern SemaphoreHandle_t Remote_semaphore;  
+extern SemaphoreHandle_t Remote_semaphore;
 RobStride_t R_left;
 RobStride_t R_right;
+
+/* 一阶低通滤波器 */
+static inline float lowpass_filter(float input, float *state, float alpha)
+{
+    *state = alpha * input + (1.0f - alpha) * (*state);
+    return *state;
+}
+
 void Task_Init()
 {
+
+		__HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
+		HAL_UART_Receive_DMA(&huart6, usart6_dma_buff, sizeof(usart6_dma_buff));
 
 		__HAL_UART_ENABLE_IT(&huart5, UART_IT_IDLE);
 		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff, sizeof(usart5_dma_buff));
 		__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	xTaskCreate(Remote_Jy61,
+				"Remote_Jy61",
+				400,
+				NULL,
+				4,
+				&Remote_Jy61_Task_Handle);
 	xTaskCreate(Remote,
-         "Remote",
-          400,
-          NULL,
-          4,
-          &Remote_Handle); 
+        "Remote",
+        400,
+        NULL,
+        4,
+        &Remote_Handle); 
 	xTaskCreate(Hit_Task,
 			 "Hit_Task",
 				258,
 				NULL,
 				4,
 				&Hit_Task_Handle); 
-    xTaskCreate(Back_Task,
-			 "Back_Task",
+//    xTaskCreate(Back_Task,
+//			 "Back_Task",
+//				400,
+//				NULL,
+//				4,
+//				&Back_Task_Handle); 
+	xTaskCreate(Remote_Analysis_Task,
+				"Remote_Analysis_Task",
 				400,
 				NULL,
 				4,
-				&Back_Task_Handle); 
-						xTaskCreate(Remote_Analysis_Task, "Remote_Analysis_Task", 400, NULL, 4, &Remote_Analysis_Handle);
+				&Remote_Analysis_Handle);
 
 }
 PackControl_t recv_pack;
-
-
 static void Key_Parse(uint32_t key, hw_key_t *out)
 {
     out->Right_Switch_Up     = (key & KEY_Right_Switch_Up)     ? 1 : 0;
@@ -87,7 +120,6 @@ static void Key_Parse(uint32_t key, hw_key_t *out)
 
     out->Left_Broadside_Key  = (key & KEY_Left_Broadside_Key)  ? 1 : 0;
 }
-
 void Remote_Analysis()
 {
     if(xSemaphoreTake(Remote_semaphore, pdMS_TO_TICKS(200)) == pdTRUE)
@@ -109,7 +141,6 @@ void Remote_Analysis()
       memset(&Remote_Control.First, 0, sizeof(Remote_Control.First));
     }
 }
-
 void MyRecvCallback(uint8_t *src, uint16_t size, void *user_data)
 {
     memcpy(&recv_buff, src, size);
@@ -117,8 +148,6 @@ void MyRecvCallback(uint8_t *src, uint16_t size, void *user_data)
     xSemaphoreGive(Remote_semaphore);
 }
 CommPackRecv_Cb  recv_cb = MyRecvCallback;
-
-
 VESC_INIT vesc_1 ={
 	.steer.motor_id = 0x01,	
 	.steer.hcan = &hcan2,
@@ -131,8 +160,94 @@ VESC_INIT vesc_3 ={
 	.steer.motor_id = 0x03,
 	.steer.hcan = &hcan2,
 };
+bool close_to_the_groung = 0;
 uint8_t tr_buf[3] = {0xAA, 0x00, 0x55};
-int a = 1;
+
+void Remote_Jy61(void *pvParameters)
+{
+    TickType_t last_wake_time = xTaskGetTickCount();
+    static float gyro_z_filt   = 0.0f;
+    static float slip_filt     = 0.0f;
+    static float corr_filt     = 0.0f;
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    for(;;)
+    {
+        float gyro_z_raw = JY61.AngularVelocity.Z;          /* 读取陀螺仪Z轴原始角速度 (度/秒) */
+        gyro_z_filt = lowpass_filter(gyro_z_raw, &gyro_z_filt, GYRO_LPF_ALPHA);
+        float gyro_z = gyro_z_filt;
+
+        if (fabsf(gyro_z) < GYRO_DEADZONE) {
+            gyro_z = 0.0f;                                   /* 陀螺仪死区 */
+        }
+
+        float expected_yaw = Remote_Control.Eomega * 180.0f / PI;  /* Eomega 已是 rad/s，直接转 deg/s */
+
+        /* 完全静止(无平移也无旋转)时跳过校正，避免陀螺仪零漂自激 */
+        if (fabsf(expected_yaw) < 0.5f &&
+            fabsf(Remote_Control.Ex) < 0.01f &&
+            fabsf(Remote_Control.Ey) < 0.01f) {
+            Wz_correction = 0.0f;
+            JY61_adjust.error_inter = 0.0f;
+            corr_filt = 0.0f;
+            vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(2));
+            continue;
+        }
+
+        float slip_raw = gyro_z - expected_yaw;              /* 滑移量 = 实际 - 期望 */
+        slip_filt = lowpass_filter(slip_raw, &slip_filt, SLIP_LPF_ALPHA);
+        float slip = slip_filt;
+
+        if (fabsf(slip) < SLIP_DEADZONE) {                   /* 滑移死区 */
+            slip = 0.0f;
+        }
+
+        gyro_slip_val = slip;
+        slip_flag = (fabsf(slip) > SLIP_THRESHOLD) ? 1 : 0;
+
+        if (slip_flag) {                                     /* 滑移时使用激进PID */
+  JY61_adjust.Kp = 2.0f;
+  JY61_adjust.Kd = 0.8f;
+  JY61_adjust.Ki = 0.001f;
+        } else {                                             /* 正常PID */
+            JY61_adjust.Kp = 0.8f;
+            JY61_adjust.Kd = 0.35f;
+            JY61_adjust.Ki = 0.0008f;
+        }
+
+        PID_Control2(slip, 0.0f, &JY61_adjust);             /* PID控制器驱动滑移量趋于0 */
+        float out = JY61_adjust.pid_out;
+
+        if (out >  CORR_OUT_MAX) { out =  CORR_OUT_MAX; }
+        if (out < -CORR_OUT_MAX) { out = -CORR_OUT_MAX; }
+
+        if (fabsf(out) < CORR_OUT_DEADZONE) {
+            out = 0.0f;
+            JY61_adjust.error_inter = 0.0f;                  /* 抗积分饱和 */
+        }
+
+        corr_filt = lowpass_filter(out, &corr_filt, CORR_LPF_ALPHA);
+        Wz_correction = corr_filt;                           /* 发布校正值 */
+
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(2));  /* 500Hz */
+    }
+}
+
+/* X方向加速度爬坡 — 避免瞬时速度阶跃导致轮子打滑 */
+static float RampAccel_X(float target, float current, float accel_step)
+{
+    if (target * current < 0) {
+        return 0.0f;  /* 方向反转时先归零 */
+    }
+    float diff = target - current;
+    if (fabsf(target) > fabsf(current)) {  /* 加速阶段 — 限幅 */
+        if (diff >  accel_step) diff =  accel_step;
+        if (diff < -accel_step) diff = -accel_step;
+        return current + diff;
+    }
+    return target;  /* 减速阶段 — 立即响应 */
+}
+
 void Remote(void *pvParameters)
 {
     g_comm_handle = Comm_Init(&huart5);
@@ -145,16 +260,41 @@ void Remote(void *pvParameters)
   	vesc_1.PID.output_limit = 40.0f;
     vesc_2.PID = vesc_1.PID;
 	  vesc_3.PID = vesc_1.PID;
-	    portTickType xLastWakeTime = xTaskGetTickCount();
+	TickType_t close_delay_tick = 0;
+	uint8_t close_delay_pending = 0;
+    static float Ex_ref = 0.0f;
+
+	  portTickType xLastWakeTime = xTaskGetTickCount();
     for(;;)
     {
-        v1 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
-        v2 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY + Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
-        v3 =    Remote_Control.Ex*SQRT3_OVER_2*MAX_VELOCITY + Remote_Control.Eomega*MAX_OMEGA*LENGTH;
+        Ex_ref = RampAccel_X(Remote_Control.Ex, Ex_ref, 0.0005f);
+
+        v1 = -Ex_ref*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v2 = +Ex_ref*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v3 =  Ex_ref*MAX_VELOCITY - Remote_Control.Eomega*MAX_OMEGA*LENGTH;
 
         wheel_one   = (-(v1 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
         wheel_two   = ((v2 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
         wheel_three = (-(v3 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
+
+        /* 轮3前馈补偿 — 直接抵消开环抓地力差异 */
+        wheel_three *= 1.20f;
+
+        /* 陀螺仪滑移校正 */
+        if (fabsf(Wz_correction) > 0.01f)
+        {
+            float slip_rad    = Wz_correction * PI / 180.0f;           /* 度/秒 -> 弧度/秒 */
+            float slip_linear = slip_rad * LENGTH;                     /* 弧度/秒 -> 米/秒 */
+            float slip_rpm    = (slip_linear / (2.0f * PI * WHEEL_RADIUS)) * 60.0f;
+            float total_grip  = WHEEL1_GRIP_RATIO + WHEEL2_GRIP_RATIO + WHEEL3_GRIP_RATIO;
+            float w1 = WHEEL1_GRIP_RATIO / total_grip;
+            float w2 = WHEEL2_GRIP_RATIO / total_grip;
+            float w3 = WHEEL3_GRIP_RATIO / total_grip;
+
+            wheel_one   += slip_rpm * w1;
+            wheel_two   -= slip_rpm * w2;
+            wheel_three += slip_rpm * w3;
+        }
 
         float wheel1_actual = (float)vesc_1.steer.epm / EXCHANGE_WHEEL_CONFIG;
         float wheel2_actual = (float)vesc_2.steer.epm / EXCHANGE_WHEEL_CONFIG;
@@ -164,19 +304,67 @@ void Remote(void *pvParameters)
         PID_Control2(wheel2_actual, wheel_two, &vesc_2.PID);
         PID_Control2(wheel3_actual, wheel_three, &vesc_3.PID);
         
-        VESC_SetCurrent(&vesc_1.steer, vesc_1.PID.pid_out);
-        VESC_SetCurrent(&vesc_2.steer, vesc_2.PID.pid_out);
-        VESC_SetCurrent(&vesc_3.steer, vesc_3.PID.pid_out);
+          VESC_SetCurrent(&vesc_3.steer, vesc_3.PID.pid_out);
+          VESC_SetCurrent(&vesc_2.steer, vesc_2.PID.pid_out);
+          VESC_SetCurrent(&vesc_1.steer, vesc_1.PID.pid_out);
+                
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Up)&&init_done_middle ==0&&init_done_near == 0)
+				{
+					init_done_far = 1;
+				far = 1;
+				}
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Right)&&init_done_far==0 && init_done_near ==0)
+				{
+					init_done_middle = 1;
+				middle = 1;
+				}
+        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Down)&&init_done_middle == 0 && init_done_far == 0)
+				{
+					init_done_near = 1;
+				near = 1;
+				}
+				   if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Left_Key_Up))
+				{
+					close_to_the_groung = 1;
+					close_delay_pending = 0;
+				}
+				if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Left_Key_Down))
+				{
+					close_to_the_groung = 0;
+					close_delay_pending = 0;
+				}
+				if(close_to_the_groung == 1)
+					{//pb0|1作为气缸向下伸
+				HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+				if(close_delay_pending == 0)
+				{
+				    close_delay_tick = xTaskGetTickCount();
+				    close_delay_pending = 1;
+				}
+				if((xTaskGetTickCount() - close_delay_tick) >= pdMS_TO_TICKS(500))
+					{//pa8pc9作为吸附地面
+				    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_SET);
+				}
+				}
+				else if( close_to_the_groung == 0)
+				{
+					  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_RESET);
+				if(close_delay_pending == 0)
+				{
+				    close_delay_tick = xTaskGetTickCount();
+				    close_delay_pending = 1;
+				}
+				if((xTaskGetTickCount() - close_delay_tick) >= pdMS_TO_TICKS(500))
+				{
 
-        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Switch_Up)&&init_done_middle ==0&&init_done_near == 0)
-				{init_done_far = 1;
-				far = 1;}
-        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Switch_Down)&&init_done_far==0 && init_done_near ==0)
-				{ init_done_middle = 1;
-				middle = 1;}
-        if(KEY_RISING_EDGE(Remote_Control.First, Remote_Control.Second, Right_Key_Right)&&init_done_middle == 0 && init_done_far == 0)
-				{init_done_near = 1;
-				near = 1;}
+									HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
+				}
+				}
+				
         vTaskDelayUntil(&xLastWakeTime, 2);
     }
 }
@@ -192,165 +380,217 @@ int16_t feel_1 = 0;
 int16_t feel_2 = 0;
 int16_t feel_3 = 0;
 int16_t feel_4 = 0;
-
-
-IFState ALLState = READY;
-
 RobStride_Expect R_left_expect = {
-	.expect_angle = -0.355f,
-	.expect_omega = 0.0f,
-	.expect_torque = -3.7f,
-	.kp = 300.0f,
-	.kd = 8.0f
+	.expect_angle = -0.37f,
+	.expect_omega = -11.0f,
+	.expect_torque = -3.5f,
+	.kp = 10.0f,
+	.kd = 28.0f
+
 };
 RobStride_Expect R_right_expect = {
 	.expect_angle = 0.39f,
-	.expect_omega = 0.0f,
-	.expect_torque = 3.7f,
-	.kp = 300.0f,
-	.kd = 8.0f
+	.expect_omega = 11.0f,
+	.expect_torque = 3.5f,
+	.kp = 10.0f,
+	.kd = 28.0f 
 };
 
 RobStride_Reset R_left_reset = {
 	.reset_angle = 0.0f,
 	.reset_omega = 0.0f,
-	.reset_torque = -2.45f,
-	.kp = 2.0f,
-	.kd = 0.0f
+	.reset_torque = -2.4f,
+	.kp = 10.0f,
+	.kd = 1.0f
 };
 RobStride_Reset R_right_reset = {
 	.reset_angle = 0.0f,
 	.reset_omega = 0.0f,
-	.reset_torque = 2.45f,
-	.kp = 2.0f,
-	.kd = 0.0f
+	.reset_torque = 2.4f,
+	.kp = 10.0f,
+	.kd = 1.0f
 };
 
+RobStride_Stop R_left_stop = {
+	.omega = 0.0f,
+	.torque = 0.0f,
+	.kp = 3.0f,
+	.kd = 1.0f
+
+};
+RobStride_Stop R_right_stop = {
+	.omega = 0.0f,
+	.torque = 0.0f,
+	.kp = 3.0f,
+	.kd = 1.0f
+	
+};
+RobStride_t R_left;
+RobStride_t R_right;
 CubicParam_t traj_left;
 CubicParam_t traj_right;
-
 TrajectoryState_t traj_left_state;
 TrajectoryState_t traj_right_state;
-
-static uint8_t ball_back_trigger = 0;// 击球标志
-static GPIO_PinState key1, key2, key3, key4;
-float time = 0.18f;// 轨迹规划时间
-static uint8_t trigger_lock = 0; // 防止电机挡住光电门误触
+CubicParam_t traj_left;
+CubicParam_t traj_right;
+static uint8_t ball_back_trigger = 0; // 击球标志
+GPIO_PinState key1, key2, key3, key4,key5; // 光电门
+float time = 0.05f; // 轨迹规划时间
+static uint8_t trigger_lock = 0; // 防止击球机构挡住光电门误触发
+float left;
+float right;
+IFState ALLState = READY;
 
 void Back_Task(void *pvParameters)
 {
-
-	
+vTaskDelay(5000);
+    RobStrideInit(&R_left, &hcan1, 0x01,RobStride_MotionControl, RobStride_04);
+	  RobStrideInit(&R_right, &hcan1, 0x02,RobStride_MotionControl, RobStride_04);
+	  vTaskDelay(100);
+	  RobStrideSetMode(&R_left, RobStride_MotionControl);
+	  RobStrideSetMode(&R_right, RobStride_MotionControl);
+	  vTaskDelay(100);
+    RobStrideEnable(&R_left);
+	  RobStrideEnable(&R_right);
+	  vTaskDelay(100);
+    RobStrideResetAngle(&R_left);
+    RobStrideResetAngle(&R_right);
+	  vTaskDelay(200);
 	  R_left_reset.reset_angle = R_left.state.rad;
 	  R_right_reset.reset_angle = R_right.state.rad;
-	
+  	static uint8_t prev_keys_none = 1;
 	TickType_t last_wake = xTaskGetTickCount();
 	for(;;)
 	{
 		key1 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
 		key2 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
-		key3 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_2);
-		key4 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3);
-		
-		if(key1 == GPIO_PIN_SET || key2 == GPIO_PIN_SET || key3 == GPIO_PIN_SET || key4 == GPIO_PIN_SET)
+		key3 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_11);
+		key4 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10);
+ 		key5 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3);
+		uint8_t current_any = (key1 == GPIO_PIN_SET) || 
+													(key2 == GPIO_PIN_SET) || 
+													(key3 == GPIO_PIN_SET) || 
+													(key4 == GPIO_PIN_SET) ||
+		                      (key5 == GPIO_PIN_SET) ;
+		if (prev_keys_none && current_any)
 		{
 			ball_back_trigger = 1;
 		}
+		prev_keys_none = ! current_any;
+
 		
-		if(ALLState == READY && trigger_lock == 0)
-			{
-			
-			if(ball_back_trigger == 1 && trigger_lock == 0)
-				{
-					ALLState = PLAN;
-					trigger_lock = 1;
-				}
-		  }
-		
-		else if (ALLState == PLAN)
+		switch(ALLState)
 		{
-				Cubic_SetTrajectory(
-						&traj_left,
-						R_left.state.rad,            // 当前真实角度
-						R_left.state.omega,          // 当前真实速度
-						R_left_expect.expect_angle,  // 目标角度
-						0,
-						time, 
-						xTaskGetTickCount()
-				);
-			
-				Cubic_SetTrajectory(
-						&traj_right,
-						R_right.state.rad,
-						R_right.state.omega,
-						R_right_expect.expect_angle,
-						0,
-						time,
-						xTaskGetTickCount()
-				);
-				ALLState = FIRE;
-		}
+			case PLAN:
+			ALLState = READY;
 
-		else if(ALLState == FIRE)
-		{
-		 if (traj_left.is_running || traj_right.is_running)
-		 {
-			Cubic_GetFullState(&traj_left,  xTaskGetTickCount(), &traj_left_state);
-			Cubic_GetFullState(&traj_right, xTaskGetTickCount(), &traj_right_state);
-				
-			RobStrideMotionControl(&R_left, 0x01, 
-			R_left_expect.expect_torque, 
-			traj_left_state.pos,
-			traj_left_state.vel,
-			R_left_expect.kp,
-			R_left_expect.kd);
-
-			RobStrideMotionControl(&R_right, 0x02, 
-			R_right_expect.expect_torque, 
-			traj_right_state.pos,
-			traj_right_state.vel,
-			R_right_expect.kp,
-			R_right_expect.kd);
-		 }
-			else
+		break;
+			case READY:
+			if(trigger_lock == 0)
 			{
-			RobStrideMotionControl(&R_left, 0x01,
-			0.0f, traj_left.target_pos, 0.0f,
-			R_left_expect.kp, R_left_expect.kd);
 				
-			RobStrideMotionControl(&R_right, 0x02,
-			0.0f, traj_right.target_pos, 0.0f,
-			R_right_expect.kp, R_right_expect.kd);
-			
-			vTaskDelay(300);
-			
-			ALLState = ALIGN;
+				if(ball_back_trigger == 1 && trigger_lock == 0)
+					{
+						ALLState = FIRE;
+						trigger_lock = 1;
+					}
 			}
-		}
+			break;
+			
+			case FIRE:
+			{
+					TickType_t fire2_wake = xTaskGetTickCount();
+					volatile uint8_t braking = 0;
+							
+					while(1)
+					{
+						if(!braking)
+						{
+							RobStrideMotionControl(&R_left, 0x01,
+								R_left_expect.expect_torque,
+								R_left_expect.expect_angle,
+								R_left_expect.expect_omega,
+								R_left_expect.kp,
+								R_left_expect.kd);
 
-		else if(ALLState == ALIGN)
-			{				
-			RobStrideMotionControl(&R_left, 0x01, 
-				R_left_reset.reset_torque, 
-				R_left_reset.reset_angle, 
-				R_left_reset.reset_omega, 
-				R_left_reset.kp, 
-				R_left_reset.kd);
-			RobStrideMotionControl(&R_right, 0x02, 
-			  R_right_reset.reset_torque, 
-				R_right_reset.reset_angle, 
-				R_right_reset.reset_omega, 
-				R_right_reset.kp, 
-				R_right_reset.kd);
-				
-		if(fabs(R_left.state.rad - R_left_reset.reset_angle) < 0.03f &&
-		   fabs(R_right.state.rad - R_right_reset.reset_angle) < 0.03f)
-				{
-					ALLState = READY;
-					trigger_lock = 0;
-					ball_back_trigger = 0;
-				}
+							RobStrideMotionControl(&R_right, 0x02,
+								R_right_expect.expect_torque,
+								R_right_expect.expect_angle,
+								R_right_expect.expect_omega,
+								R_right_expect.kp,
+								R_right_expect.kd);
+
+							// 检测是否接近目标位置，触发刹车
+							if(R_left.state.rad <= -0.32f && R_right.state.rad >= 0.34f)
+							{
+								left = R_left.state.rad;
+								right = R_right.state.rad;
+								
+								braking = 1;
+							}
+						}
+						else
+						{
+							// 停止输出
+							RobStrideMotionControl(&R_left, 0x01, R_left_stop.torque, left, 0.0f, R_left_stop.kp, R_left_stop.kd);
+							RobStrideMotionControl(&R_right, 0x02, R_right_stop.torque, right, 0.0f, R_right_stop.kp, R_right_stop.kd);
+
+							// 检测电机速度是否接近0，退出
+							if(fabs(R_left.state.omega) < 1.0f && fabs(R_right.state.omega) < 1.0f)
+							{
+								break;
+							}
+							
+						}
+
+						vTaskDelayUntil(&fire2_wake, pdMS_TO_TICKS(2));
+					}
+
+							
+						vTaskDelay(600);
+
+				last_wake = xTaskGetTickCount();
+				ALLState = ALIGN;
+
+				break;
 			}
+				
+			case ALIGN:
+			{
+					RobStrideMotionControl(&R_left, 0x01,
+						R_left_reset.reset_torque,
+						R_left_reset.reset_angle,
+						R_left_reset.reset_omega,
+						R_left_reset.kp,
+						R_left_reset.kd);
+
+					RobStrideMotionControl(&R_right, 0x02,
+						R_right_reset.reset_torque,
+						R_right_reset.reset_angle,
+						R_right_reset.reset_omega,
+						R_right_reset.kp,
+						R_right_reset.kd);
+
+				// 等待机构稳定
+				vTaskDelay(80);
+
+				// 机构稳定后重新同步光电门状态
+				key1 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
+				key2 = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
+				key3 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_2);
+				key4 = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3);
+				uint8_t any = (key1 == GPIO_PIN_SET) || (key2 == GPIO_PIN_SET) || (key3 == GPIO_PIN_SET) || (key4 == GPIO_PIN_SET);
+				prev_keys_none = !any;
+
+				last_wake = xTaskGetTickCount();
+				ALLState = PLAN;
+				trigger_lock = 0;
+				ball_back_trigger = 0;
+				break;
+			}
+			default:
+				break;
+		}
 	 vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
 	}
 }
@@ -384,9 +624,9 @@ typedef enum {
     BALL_RESET
 } BallState_t;
 
-int time_prepare_far = 450; 
+int time_prepare_far = 1450; 
 
-int time_prepare_middle = 300;
+int time_prepare_middle = 1300;
 
 int time_prepare_near = 200;
 
@@ -415,14 +655,20 @@ void BallStateMachine(BallState_t *state, char *init_done, float target_angle, f
 					}
 					
         case BALL_PREPARE:
-            if ((now - state_start) < pdMS_TO_TICKS(prepare_time))
+            if ((now - state_start) < pdMS_TO_TICKS(prepare_time+840))
             {
                 if(init_done_far ==1)
-							send_flag(1);
+								{	
+								send_flag(1); init_done_far = 2;
+								}
 								 if(init_done_middle ==1)
-							send_flag(2);
+								 {
+								 send_flag(2);init_done_middle = 2;
+								 }
 								  if(init_done_near ==1)
-							send_flag(3); 
+									{
+										send_flag(3);init_done_near = 2;
+									} 
             }
             else
             {
@@ -451,7 +697,7 @@ void BallStateMachine(BallState_t *state, char *init_done, float target_angle, f
             {
                 PID_Control2(Lift_Motor.motor.Angle_DEG, home_angle, &Lift_Motor.pos_pid);
                 PID_Control2(Lift_Motor.motor.Speed, Lift_Motor.pos_pid.pid_out, &Lift_Motor.vel_pid);
-                motorCurrentBuf[2] = (int16_t)Lift_Motor.vel_pid.pid_out;
+                motorCurrentBuf[3] = (int16_t)Lift_Motor.vel_pid.pid_out;
                 MotorSend(&hcan1, 0x200, motorCurrentBuf);
             }
             else
@@ -470,26 +716,20 @@ void Hit_Task(void *pvParameters)
 {
     Lift_Motor.ID = 0x203;
     Lift_Motor.hcan = &hcan1;
-
-    // PID 参数初始化
     Lift_Motor.pos_pid.Kp = 22.1f;
     Lift_Motor.pos_pid.Ki = 0.0f;
     Lift_Motor.pos_pid.Kd = 0.0f;
     Lift_Motor.pos_pid.limit = 10000.0f;
     Lift_Motor.pos_pid.output_limit = 9006.3f;
-
     Lift_Motor.vel_pid.Kp = 8.0f;
     Lift_Motor.vel_pid.Ki = 0.01f;
     Lift_Motor.vel_pid.Kd = 0.0f;
     Lift_Motor.vel_pid.limit = 10000.0f;
     Lift_Motor.vel_pid.output_limit = 16384.0f;
-
     TickType_t last_wake = xTaskGetTickCount();
-
     BallState_t far_state = BALL_IDLE;
     BallState_t middle_state = BALL_IDLE;
     BallState_t near_state = BALL_IDLE;
-
     while(1)
     {
 			if (rad_init<100) { 
@@ -501,44 +741,37 @@ void Hit_Task(void *pvParameters)
 			}
         BallStateMachine(&far_state, &init_done_far, second_angle, first_angle, time_prepare_far, UP_VOLLEY_MOTOR_MS);
         BallStateMachine(&middle_state, &init_done_middle, second_angle, first_angle, time_prepare_middle, UP_VOLLEY_MOTOR_MS);
-        BallStateMachine(&near_state, &init_done_near, second_angle, first_angle, time_prepare_near, UP_VOLLEY_MOTOR_MS);
-  
+        BallStateMachine(&near_state, &init_done_near, second_angle, first_angle, time_prepare_near+1300, UP_VOLLEY_MOTOR_MS);
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(2));
     }
 }
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-	if(hcan->Instance ==CAN1)
-	{
-
-
-		uint8_t Recv[8] = {0};
-
-    if (hcan->Instance == CAN1)
-    {
-			
-	uint32_t ID = CAN_Receive_DataFrame(&hcan1, Recv);
-//if(ID == 0x01) {
-    RobStrideRecv_Handle(&R_left, &hcan1, ID, Recv);
-//} else if(ID == 0x02) {
-    RobStrideRecv_Handle(&R_right, &hcan1, ID, Recv);
-//}
-//else if(ID == 0x203)
-//		{
-	int c =		Motor3508Recv(&Lift_Motor,hcan, ID, Recv);
-//		}
-			}
-}
-	}
-void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-	uint8_t Recv[8] = {0};
-	uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
-VESC_ReceiveHandler(&vesc_1.steer, &hcan2, ID,Recv);
-	VESC_ReceiveHandler(&vesc_2.steer, &hcan2, ID,Recv);
-VESC_ReceiveHandler(&vesc_3.steer, &hcan2, ID,Recv);
-}
-
+  void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+  {
+      if (hcan->Instance == CAN1)
+      {
+          while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
+          {
+              uint8_t Recv[8] = {0};
+              uint32_t ID = CAN_Receive_DataFrame(&hcan1, Recv);
+              RobStrideRecv_Handle(&R_left, &hcan1, ID, Recv);
+              RobStrideRecv_Handle(&R_right, &hcan1, ID, Recv);
+              Motor3508Recv(&Lift_Motor, hcan, ID, Recv);
+          }
+      }
+  }
+  void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
+  {
+      for (int i = 0; i < 3; i++)
+      {
+          if (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO1) == 0)
+              break;
+          uint8_t Recv[8] = {0};
+          uint32_t ID = CAN_Receive_DataFrame(hcan, Recv);
+          VESC_ReceiveHandler(&vesc_1.steer, &hcan2, ID, Recv);
+          VESC_ReceiveHandler(&vesc_2.steer, &hcan2, ID, Recv);
+          VESC_ReceiveHandler(&vesc_3.steer, &hcan2, ID, Recv);
+      }
+  }
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == UART4)
