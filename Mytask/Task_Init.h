@@ -25,13 +25,32 @@
 #include "PID.h"
 #include "VESC.h"
 #include "step.h"
+#include "JY61.h"
 
 #define GEAR_RATIO 19.2f
+
+/* 陀螺仪滤波参数 */
+#define GYRO_LPF_ALPHA      0.50f   /* 陀螺仪原始值低通系数 (0~1) */
+#define SLIP_LPF_ALPHA      0.50f   /* 滑移量滤波系数 */
+#define CORR_LPF_ALPHA      0.65f   /* 校正输出滤波系数 */
+
+#define GYRO_DEADZONE       0.50f   /* 陀螺仪死区 (度/秒) */
+#define SLIP_DEADZONE       0.30f   /* 滑移死区 (度/秒) */
+#define CORR_OUT_DEADZONE   0.25f   /* 校正输出死区 (度/秒) */
+
+#define CORR_OUT_MAX        4.0f    /* 校正输出最大值 (度/秒) */
+#define SLIP_THRESHOLD      0.50f   /* 滑移判断阈值 (度/秒) */
+
+/* 轮子抓地力权重 */
+#define WHEEL1_GRIP_RATIO   1.0f
+#define WHEEL2_GRIP_RATIO   1.0f
+#define WHEEL3_GRIP_RATIO   0.85f
 void Task_Init(void);
 void send_flag(uint8_t val);
 
 
 TaskHandle_t Remote_Jy61_Task_Handle;
+void Remote_Jy61(void *pvParameters);
 void Remote_Analysis();
 void Remote_update(void *pvParameters);
 TaskHandle_t Remote_update_handle;
@@ -75,6 +94,11 @@ extern ChassisMode chassis_mode;
 extern Remote_Handle_t Remote_Control;
 extern uint8_t usart4_dma_buff[30];
 extern uint8_t usart5_dma_buff[60];
+extern uint8_t usart6_dma_buff[30];
+extern float Wz_correction;
+extern float gyro_slip_val;
+extern uint8_t slip_flag;
+extern PID2 JY61_adjust;
 void Remote(void *pvParameters);
 extern TaskHandle_t Remote_Handle;
 typedef struct
@@ -135,12 +159,12 @@ typedef struct
 	float kp;
 	float kd;
 }RobStride_Stop;
-// ״̬��
+// ״̬��
 typedef enum {	
-	PLAN = 0,  //�켣��ʼ�滮
-	READY,//�ȴ�
-	FIRE, //����
-	ALIGN,//��λ
+	PLAN = 0,  //�켣��ʼ�滮
+	READY,//�ȴ�
+	FIRE, //����
+	ALIGN,//��λ
 } IFState;
 void Hit_Task(void *pvParameters);
 #endif

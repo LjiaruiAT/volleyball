@@ -11,6 +11,18 @@ ChassisMode chassis_mode = REMOTE;
 Remote_Handle_t Remote_Control;
 uint8_t usart4_dma_buff[30];
 uint8_t usart5_dma_buff[60];
+uint8_t usart6_dma_buff[30];
+/* 陀螺仪校正变量 */
+float Wz_correction = 0.0f;
+float gyro_slip_val = 0.0f;
+uint8_t slip_flag = 0;
+PID2 JY61_adjust = {
+    .Kp = 0.8f,
+    .Ki = 0.0008f,
+    .Kd = 0.35f,
+    .limit = 8000.0f,
+    .output_limit = 60.0f
+};
 float Vx = 0;
 float Vy = 0;
 float Wz = 0;
@@ -37,12 +49,28 @@ float rocker_filter[4] = {0};
 extern SemaphoreHandle_t Remote_semaphore;  
 RobStride_t R_left;
 RobStride_t R_right;
+/* 一阶低通滤波器 */
+static inline float lowpass_filter(float input, float *state, float alpha)
+{
+    *state = alpha * input + (1.0f - alpha) * (*state);
+    return *state;
+}
+
 void Task_Init()
 {
+
+		__HAL_UART_ENABLE_IT(&huart6, UART_IT_IDLE);
+		HAL_UART_Receive_DMA(&huart6, usart6_dma_buff, sizeof(usart6_dma_buff));
 
 		__HAL_UART_ENABLE_IT(&huart5, UART_IT_IDLE);
 		HAL_UARTEx_ReceiveToIdle_DMA(&huart5, usart5_dma_buff, sizeof(usart5_dma_buff));
 		__HAL_DMA_DISABLE_IT(huart5.hdmarx, DMA_IT_HT);
+	xTaskCreate(Remote_Jy61,
+				"Remote_Jy61",
+				400,
+				NULL,
+				4,
+				&Remote_Jy61_Task_Handle);
 	xTaskCreate(Remote,
          "Remote",
           400,
@@ -55,12 +83,12 @@ void Task_Init()
 				NULL,
 				4,
 				&Hit_Task_Handle); 
-    xTaskCreate(Back_Task,
-			 "Back_Task",
-				400,
-				NULL,
-				4,
-				&Back_Task_Handle); 
+//	xTaskCreate(Back_Task,
+//		 "Back_Task",
+//			400,
+//			NULL,
+//			4,
+//			&Back_Task_Handle); 
 						xTaskCreate(Remote_Analysis_Task, "Remote_Analysis_Task", 400, NULL, 4, &Remote_Analysis_Handle);
 
 }
@@ -124,7 +152,7 @@ float vx,vy,vz = 0;
       }
 
       /* 4. 二选一输出 */
-      if (radar_d <= 1.5f) {
+      if (radar_d <= 4.5f) {
           chassis_mode = AUTO;
           float Kp = 4.0f;
           Remote_Control.Ex     = Kp * (radar_dx - 0.0f);
@@ -162,6 +190,92 @@ VESC_INIT vesc_3 ={
 };
 uint8_t tr_buf[3] = {0xAA, 0x00, 0x55};
 int a = 1;
+void Remote_Jy61(void *pvParameters)
+{
+    TickType_t last_wake_time = xTaskGetTickCount();
+    static float gyro_z_filt   = 0.0f;
+    static float slip_filt     = 0.0f;
+    static float corr_filt     = 0.0f;
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    for(;;)
+    {
+
+        float gyro_z_raw = JY61.AngularVelocity.Z;          /* 读取陀螺仪Z轴原始角速度 (度/秒) */
+        gyro_z_filt = lowpass_filter(gyro_z_raw, &gyro_z_filt, GYRO_LPF_ALPHA);
+        float gyro_z = gyro_z_filt;
+
+        if (fabsf(gyro_z) < GYRO_DEADZONE) {
+            gyro_z = 0.0f;                                   /* 陀螺仪死区 */
+        }
+
+        float expected_yaw = Remote_Control.Eomega * 180.0f / PI;  /* Eomega 已是 rad/s，直接转 deg/s */
+
+        /* 完全静止(无平移也无旋转)时跳过校正，避免陀螺仪零漂自激 */
+        if (fabsf(expected_yaw) < 0.5f &&
+            fabsf(Remote_Control.Ex) < 0.01f &&
+            fabsf(Remote_Control.Ey) < 0.01f) {
+            Wz_correction = 0.0f;
+            JY61_adjust.error_inter = 0.0f;
+            corr_filt = 0.0f;
+            vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(2));
+            continue;
+        }
+
+        float slip_raw = gyro_z - expected_yaw;              /* 滑移量 = 实际 - 期望 */
+        slip_filt = lowpass_filter(slip_raw, &slip_filt, SLIP_LPF_ALPHA);
+        float slip = slip_filt;
+
+        if (fabsf(slip) < SLIP_DEADZONE) {                   /* 滑移死区 */
+            slip = 0.0f;
+        }
+
+        gyro_slip_val = slip;
+        slip_flag = (fabsf(slip) > SLIP_THRESHOLD) ? 1 : 0;
+
+        if (slip_flag) {                                     /* 滑移时使用激进PID */
+            JY61_adjust.Kp = 2.0f;
+            JY61_adjust.Kd = 0.8f;
+            JY61_adjust.Ki = 0.001f;
+        } else {                                             /* 正常PID */
+            JY61_adjust.Kp = 0.8f;
+            JY61_adjust.Kd = 0.35f;
+            JY61_adjust.Ki = 0.0008f;
+        }
+
+        PID_Control2(slip, 0.0f, &JY61_adjust);             /* PID控制器驱动滑移量趋于0 */
+        float out = JY61_adjust.pid_out;
+
+        if (out >  CORR_OUT_MAX) { out =  CORR_OUT_MAX; }
+        if (out < -CORR_OUT_MAX) { out = -CORR_OUT_MAX; }
+
+        if (fabsf(out) < CORR_OUT_DEADZONE) {
+            out = 0.0f;
+            JY61_adjust.error_inter = 0.0f;                  /* 抗积分饱和 */
+        }
+
+        corr_filt = lowpass_filter(out, &corr_filt, CORR_LPF_ALPHA);
+        Wz_correction = corr_filt;                           /* 发布校正值 */
+
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(2));  /* 500Hz */
+    }
+}
+
+/* X方向加速度爬坡 — 避免瞬时速度阶跃导致轮子打滑 */
+static float RampAccel_X(float target, float current, float accel_step)
+{
+    if (target * current < 0) {
+        return 0.0f;  /* 方向反转时先归零 */
+    }
+    float diff = target - current;
+    if (fabsf(target) > fabsf(current)) {  /* 加速阶段 — 限幅 */
+        if (diff >  accel_step) diff =  accel_step;
+        if (diff < -accel_step) diff = -accel_step;
+        return current + diff;
+    }
+    return target;  /* 减速阶段 — 立即响应 */
+}
+
 void Remote(void *pvParameters)
 {
     g_comm_handle = Comm_Init(&huart5);
@@ -175,15 +289,37 @@ void Remote(void *pvParameters)
     vesc_2.PID = vesc_1.PID;
 	  vesc_3.PID = vesc_1.PID;
 	    portTickType xLastWakeTime = xTaskGetTickCount();
+    static float Ex_ref = 0.0f;
     for(;;)
     {
-        v1 = -Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
-        v2 = +Remote_Control.Ex*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
-        v3 =    Remote_Control.Ex*SQRT3_OVER_2*MAX_VELOCITY - Remote_Control.Eomega*MAX_OMEGA*LENGTH;
+        Ex_ref = RampAccel_X(Remote_Control.Ex, Ex_ref, 0.0005f);
+
+        v1 = -Ex_ref*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY - LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v2 = +Ex_ref*OMNI_WHEEL_FACTOR*MAX_VELOCITY - Remote_Control.Ey*SQRT3_OVER_2*MAX_VELOCITY + LENGTH * Remote_Control.Eomega*MAX_OMEGA;
+        v3 =  Ex_ref*SQRT3_OVER_2*MAX_VELOCITY - Remote_Control.Eomega*MAX_OMEGA*LENGTH;
 
         wheel_one   = (-(v1 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
         wheel_two   = ((v2 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
         wheel_three = (-(v3 / (2.0f * PI * WHEEL_RADIUS))* GEAR_RATIO);
+
+        /* 轮3前馈补偿 — 直接抵消开环抓地力差异 */
+        wheel_three *= 1.20f;
+
+        /* 陀螺仪滑移校正 */
+        if (fabsf(Wz_correction) > 0.01f)
+        {
+            float slip_rad    = Wz_correction * PI / 180.0f;           /* 度/秒 -> 弧度/秒 */
+            float slip_linear = slip_rad * LENGTH;                     /* 弧度/秒 -> 米/秒 */
+            float slip_rpm    = (slip_linear / (2.0f * PI * WHEEL_RADIUS)) * 60.0f;
+            float total_grip  = WHEEL1_GRIP_RATIO + WHEEL2_GRIP_RATIO + WHEEL3_GRIP_RATIO;
+            float w1 = WHEEL1_GRIP_RATIO / total_grip;
+            float w2 = WHEEL2_GRIP_RATIO / total_grip;
+            float w3 = WHEEL3_GRIP_RATIO / total_grip;
+
+            wheel_one   += slip_rpm * w1;
+            wheel_two   -= slip_rpm * w2;
+            wheel_three += slip_rpm * w3;
+        }
 
         float wheel1_actual = (float)vesc_1.steer.epm / EXCHANGE_WHEEL_CONFIG;
         float wheel2_actual = (float)vesc_2.steer.epm / EXCHANGE_WHEEL_CONFIG;
@@ -456,6 +592,7 @@ void send_flag(uint8_t val)
 
     if (huart4.gState == HAL_UART_STATE_READY)
     {
+
         HAL_UART_Transmit_DMA(&huart4, tx_buf, sizeof(tx_buf));
     }
 }
@@ -488,6 +625,7 @@ void BallStateMachine(BallState_t *state, char *init_done, float target_angle, f
 
     switch(*state)
     {
+
         case BALL_IDLE:
             if(*init_done)
             {
@@ -583,6 +721,7 @@ void Hit_Task(void *pvParameters)
 
     while(1)
     {
+
 			if (rad_init<100) { 
 			first_angle = Lift_Motor.motor.Angle_DEG; 
 			second_angle = first_angle + MOTOR_ANGLE_OFFSET_DEG; 
@@ -607,6 +746,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
     if (hcan->Instance == CAN1)
     {
+
 			
 	uint32_t ID = CAN_Receive_DataFrame(&hcan1, Recv);
 //if(ID == 0x01) {
@@ -634,6 +774,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == UART4)
     {
+
     }
 }
 

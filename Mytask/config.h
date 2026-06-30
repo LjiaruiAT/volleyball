@@ -1,7 +1,7 @@
 
 #define PI 3.14159265359f
 #define MAX_VELOCITY 15.0f	  
-#define MAX_OMEGA PI*15	 	
+#define MAX_OMEGA PI*3	 	
 #define LENGTH 0.457f	  
 #define WHEEL_RADIUS 0.075f  
 #define MODE_t  1		 
