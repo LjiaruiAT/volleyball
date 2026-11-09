@@ -35,7 +35,7 @@ ROBOCON 排球赛项的动作链：底盘移动到击球位 → 姿态对准 →
 Volley_ok/
 ├── Core/            CubeMX 生成：CAN / UART / DMA / GPIO / FreeRTOS
 ├── Mytask/          业务层：Task_Init.c（状态机与任务）、config.h（参数）
-├── MyLib/           驱动与算法：
+├── lib/             驱动与算法：
 │   ├── CANDrive      CAN 底层收发
 │   ├── motor/motorEx DJI 电机解析与串级 PID
 │   ├── VESC          VESC 原生 CAN 协议
