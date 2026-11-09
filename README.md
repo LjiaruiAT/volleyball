@@ -1,269 +1,115 @@
-# 🔥 exact_fire — 全向轮底盘 + RobStride 弹射 + VESC 舵轮，竞赛机器人主控
+# ROBOCON 排球机器人主控（Volley_ok）
 
-> STM32F407VGTx · FreeRTOS · CAN 双总线 · 自研力控底盘框架 · 五次多项式轨迹规划
+三轮全向轮底盘 + RobStride 弹射 + Unitree GoMotor 击球
+**STM32F407VETx · FreeRTOS · 双 CAN · RS485 · 自定义遥控协议**
 
----
-
-## 📋 功能概览
-
-本项目是一个完整的三全向轮机器人竞赛主控固件，集成了**底盘运动控制**、**M3508 挑球 + GoMotor 击球两级协同**、**弹射机构控制**、**遥控通信**和**IMU 防打滑**五大功能模块。
-
-| 子系统 | 硬件 | 通信 | 控制方式 |
-|--------|------|------|----------|
-| 底盘 (3 全向轮) | VESC v6.4 ×3 | CAN2 | PID 速度闭环 |
-| 弹射机构 | RobStride 电机 ×2 | CAN1 | 位置+力混合 (MIT 模式) |
-| 扬臂 (挑球) | DJI M3508 | CAN1 | 位置 + 速度串级 PID |
-| 击球 (二级) | Unitree GoMotor ×2 | RS485 (H743 控制) | 跨板通信触发 |
-| 遥控 | 自定义 UART 协议 | UART5 (DMA) | 事件驱动回调 |
-| 跨板通信 | 自定义协议 | UART4 (DMA) → H743 UART7 | DMA 半双工 |
-| IMU 防打滑 | JY61 姿态传感器 | UART6 (DMA) | 自适应 PID + 抓地力权重分配 |
+> 2026 赛季排球机器人主控固件。本 README 描述的是**这个仓库里实际存在的代码**。
 
 ---
 
-## 🏗️ 架构分层
+## 1. 项目背景
 
-```
-┌──────────────────────────────────────────────────────┐
-│           Task_Init.c（业务逻辑 + 状态机）              │
-│   Remote() · Remote_Jy61() · Hit_Task() · Back_Task() │
-├──────────────────────────────────────────────────────┤
-│  AutoPilot (五次多项式) │ ForceChassis (力控底盘)     │
-│  IMU Anti-Slip (自适应PID + 抓地力权重分配)            │
-│  step/CubicParam (三次多项式) │ PID + FuzzyPID        │
-├──────────────────────────────────────────────────────┤
-│  motor · VESC · RobStride2 · go_motor · JY61         │
-├──────────────────────────────────────────────────────┤
-│  CANDrive · 485_bus · comm (遥控协议栈) · crc_ccitt   │
-├──────────────────────────────────────────────────────┤
-│  RMLibHead (跨平台适配层) · My_list (通用链表)         │
-├──────────────────────────────────────────────────────┤
-│    FreeRTOS + CMSIS-RTOS2 + STM32 HAL (F407)          │
-└──────────────────────┬───────────────────────────────┘
-                       │ UART4 → H743 UART7
-┌──────────────────────▼───────────────────────────────┐
-│              STM32H743 (二级击球)                      │
-│         GoMotor RS485 驱动 + 击球轨迹规划              │
-└──────────────────────────────────────────────────────┘
-```
+ROBOCON 排球赛项的动作链：底盘移动到击球位 → 姿态对准 → 挑球 / 弹射 → 二级机构击球出球。
+
+这台车的机构方案是「三轮全向轮底盘 + 灵足（RobStride）电机弹射 + 宇树（Unitree）GoMotor 二级击球」，三种电机走三种不同协议，控制侧的主要工作是把它们统一到一个状态机里。
 
 ---
 
-## 🧠 核心巧思
+## 2. 硬件与总线
 
-### 1. 五次多项式轨迹规划器 (`AutoPilot.c`)
-
-给定起点和终点的 **位置、速度、加速度** 共 6 个边界条件，直接解析求解五次多项式系数：
-
-```
-p(t) = a + b·t + c·t² + d·t³ + e·t⁴ + f·t⁵
-```
-
-**精妙之处：**
-- **参数归一化**：在 `set_quintic()` 中把速度和加速度分别乘以 dt 和 dt²，使时间归一化到 [0,1]，避免了浮点溢出且公式极简。
-- **约束迭代时间缩放**：规划后遍历速度/加速度/角速度/角加速度四个维度的最大值，若超限则找出**超限比例最大**的那个维度作为缩放依据，按比例拉伸运动时间，重算曲线。这样只多花刚好满足最紧约束的时间，不保守。
-- **力控/速度双模式兼容**：`setAcc_cb` 为空时自动跳过力控输出，退化为纯速度/位置控制——同一个框架既可用在力控底盘也可用在速度底盘，无需改代码。
-- **任务取消**：外部给信号量可随时中断当前轨迹，自动清零速度和加速度输出，并清空任务队列——安全退出不甩尾。
-- **回调完成通知**：每条轨迹执行完后调用 `finish_cb`，上层可以在回调里链式下发下一条轨迹。
-
-### 2. 力控底盘数学解耦 (`ForceChassis.c`)
-
-将三个广义力 (Fx, Fy, Mz) 解耦为 N 个轮子的 (速度方向, 速度大小, 力矩)。
-
-**精妙之处：**
-- **矩阵预计算**：所有映射矩阵（运动学 `A_vel` 和动力学 `force_A = A_vel^T`）在初始化时根据轮子安装位姿一次性算好，运行时纯矩阵乘法，零开销。
-- **质心偏移的质量矩阵**：
-  ```
-  Mq = [ m      0      -m·y_c ]
-       [ 0      m       m·x_c ]
-       [ -m·y_c m·x_c   I+... ]
-  ```
-  精确刻画了质心不在几何中心时的力-力矩耦合，支持非对称布局机器人。
-- **力矩投影避免奇点**：速度小于死区时 `atan2f` 不稳定，直接置零力矩指令，防止舵轮跳变。
-- **QR 分解正解**：从 N 个轮子实测速度反解机器人本体速度，QR 分解求解超定方程组，天然处理轮子冗余。
-
-### 3. 弹射机构：三次多项式 + 状态机 (`Back_Task` + `step.c`)
-
-弹射流程由四状态状态机驱动：`READY → PLAN → FIRE → ALIGN → READY`。
-
-**精妙之处：**
-- **轨迹预计算**：`PLAN` 状态中调用 `Cubic_SetTrajectory()` 根据当前位置和目标角度离线算出三次多项式系数，然后立即切到 `FIRE` 状态执行——计算和执行分离，执行阶段零延迟。
-- **RobStride MIT 控制模式**：同时下发期望位置、速度、前馈力矩、Kp、Kd，电机端做阻抗控制，力位混合跟踪，弹射力度可控。
-- **光电门触发**：四个 GPIO 检测球到位后自动触发弹射流程，`trigger_lock` 互锁防止重复触发。
-- **复位阶段**：弹射完成后自动回到初始角度，到位精度 < 0.03 rad，到位后释放锁允许再次触发。
-- **最小时间保护**：`if (duration < 0.05f) duration = 0.05f`，防止极小时间导致系数爆炸。
-
-### 4. 扬臂 + 击球：两级协同机制 (`Hit_Task` + 跨板通信)
-
-**第一级 — M3508 挑球：** 一个 M3508 电机将排球从地面挑起至空中，三条球路（far / middle / near）由遥控器拨杆选择。
-
-**第二级 — Unitree GoMotor 击球：** STM32H743 独立控制宇树电机，收到 F407 的触发信号后将空中球击飞。
-
-**精妙之处：**
-- **参数化的 `BallStateMachine()` 函数**：六个参数 (state指针, init_done标志, 目标角度, 归位角度, 准备时间, 击球时间) 将三条球路的逻辑统一为一个函数，调用三次即可——DRY 原则贯彻到底。
-- **串级 PID**：外环位置环 → 内环速度环，将 3508 的角度和速度同时锁定在轨迹上。
-- **跨板通信触发**：挑球前通过 `send_flag()` 经 UART4 → H743 的 UART7 发送球路编号（0xAA, cmd, 0x55 协议），H743 收到后按球路参数驱动 GoMotor 执行击球动作，两块主控各司其职。
-- **互斥保护**：`init_done` 三态互斥，确保同一时刻只有一条球路在执行。
-
-### 5. RobStride 电机 CAN 协议 (`RobStride2.c`)
-
-**精妙之处：**
-- **扭矩编码进扩展帧 ID**：`ExtID = (0x1 << 24) | (torque_u16 << 8) | motor_id`。控制指令编码在 CAN ID 中，数据区留给位置/速度/Kp/Kd，一个帧传完所有控制参数，带宽利用率极高。
-- **按型号自动量化**：四种型号 (01~04) 有不同的扭矩/速度量程，`float_to_uint16()` 按型号自动选择范围映射，一套代码通吃。
-- **反馈解码对称**：`(u16 - 32767) * scale / 32767`，收发对称降低出错概率。
-- **扩展 ID 分段路由**：bit24~31 为消息类型（0=设备信息, 2=反馈数据, 17=参数回读, 21=错误信息），不同 ID 段走不同解码分支。
-
-### 6. PID 库：三种 PID + 模糊 PID (`PID.c` + `PID.h`)
-
-**精妙之处：**
-- **改进标志位组合**：用 `uint8_t` 的每一位表示一种改进策略（积分限幅、微分先行、梯形积分、变速积分、输出滤波……），通过位或自由组合，不需要写 N 个函数。
-- **增量式 + 位置式 + 史密斯预测**：三种经典 PID 共存在同一个结构体中，按场景选用。
-- **模糊 PID**：7×7 模糊规则表通过双线性插值实时调节 Kp/Ki/Kd，适合工况变化大的场景。
-- **死区 + 输出限幅 + 积分分离**：标准工业级 PID 的必备特性都在。
-
-### 7. 遥控通信协议栈 (`Remote_control/`)
-
-**精妙之处：**
-- **命令-回调注册机制**：`register_comm_recv_cb(callback, cmd, user_data)` 按命令字注册回调，收到匹配数据包时自动分发，类似事件总线。
-- **零拷贝重传**：ACK 模式下数据指针在收到确认前一直有效，重发时直接复用原始指针，不拷贝。
-- **双模式**：`asyn_comm_send_pack_nak`（非阻塞不等 ACK）和 `comm_send_pack_ack`（阻塞等 ACK + 自动重试），满足不同实时性需求。
-- **键值边沿检测宏**：
-  ```c
-  #define KEY_RISING_EDGE(cur, last, field) \
-      ((cur.field == 1) && (last.field == 0))
-  ```
-  14 个按键用位域结构体承载，一行宏完成上升沿检测，可读性极强。
-- **UART DMA 空闲中断**：`HAL_UARTEx_ReceiveToIdle_DMA` 而非定长接收，遥控数据包变长也可正确分包。
-
-### 8. RMLibHead 跨平台适配层
-
-**精妙之处：**
-- **编译时平台检测**：根据 `STM32F405xx` / `STM32H743xx` 等宏自动选择对应 HAL 头文件，同一套代码在 F4/H7 间迁移只需改芯片型号。
-- **RTOS 透明切换**：定义 `__USE_RTOS` 时临界区自动用 `vPortEnterCritical()`，否则退化空宏；内存分配自动用 `pvPortMalloc()` 或标准 `malloc()`。
-
-### 9. VESC CAN 协议实现 (`VESC.c`)
-
-直接对接 VESC 开源电调的原生 CAN 协议（参考 `vedderb/bldc` 的 `comm_can.c`），支持设定电流/占空比/RPM/位置，同时接收状态帧（转速、电流、功率、温度）。
-
-### 10. UART 错误恢复 (`HAL_UART_ErrorCallback`)
-
-UART5 接收出错时手动按 STM32F4 参考手册要求的顺序（先读 SR 再读 DR）清除 ORE/NE/FE/PE 错误标志，然后重新启动 DMA 接收——防止遥控信号受干扰后通信永久中断。
-
-### 11. IMU 防打滑：自适应 PID + 抓地力权重分配 (`Remote_Jy61` + `Remote`)
-
-JY61 姿态传感器提供 Z 轴角速度，与遥控器期望角速度比对，检测并纠正全向轮打滑。
-
-**精妙之处：**
-- **双 PID 参数自适应**：根据 `slip_flag` 自动切换 PID 增益——打滑时激进（Kp=2.0, Kd=0.8），正常时保守（Kp=0.8, Kd=0.35），兼顾抑制速度与稳态平顺性。
-- **三级低通滤波链**：
-  ```
-  陀螺仪原始值 → GYRO_LPF(α=0.50) → 滑移量计算 → SLIP_LPF(α=0.50)
-  → PID 校正 → CORR_LPF(α=0.65) → 输出到轮速指令
-  ```
-  层层去噪，避免高频抖动耦合进轮速控制。
-- **抓地力权重分配**：三个全向轮的抓地力不同（轮 3 较弱，权重 0.85），校正量按权重比分配而非均摊——抓地力强的轮子承担更多抑制任务，防止弱抓地力轮子自身打滑。
-- **静止保护**：当遥控器平移和旋转指令均接近零时，强制清零校正值和积分项，防止陀螺仪零漂在静止时自激振荡。
-- **多重死区防护**：陀螺仪死区 (0.50°/s) → 滑移死区 (0.30°/s) → 校正输出死区 (0.25°/s)，三级级联死区确保微小噪声不会引发不必要的轮速修正。
-- **加速度爬坡 (`RampAccel_X`)**：X 方向速度指令逐周期爬坡（步长 0.0005），方向反转时先归零再反向加速，从源头减少瞬时速度阶跃导致的打滑。
-- **校正限幅**：输出钳位在 ±4.0°/s，防止极端打滑场景下 PID 积分饱和导致校正过冲。
-- **独立高频率任务**：`Remote_Jy61` 以 500Hz 独立运行，与 500Hz 的 `Remote` 底盘控制任务同频但解耦——IMU 校正值的计算和消费在不同任务中，时序清晰，不阻塞底盘主循环。
+| 子系统 | 硬件 | 接口 | 说明 |
+|---|---|---|---|
+| 主控 | STM32F407VETx | — | CubeMX 工程 `Volley_ok.ioc` |
+| 实时内核 | FreeRTOS | — | `Core/Src/freertos.c` |
+| 底盘 | VESC 驱动 5055 三轮全向 | CAN2 | `MyLib/VESC.c` |
+| 弹射 | RobStride（灵足） | CAN1 扩展帧 | `MyLib/RobStride2.c`，MIT 力位混合 |
+| 击球 | Unitree GoMotor | RS485 | `MyLib/go_motor.c` + `MyLib/485_bus.c` |
+| 遥控 | 自定义协议 | UART + DMA | `Remote_control/` 协议栈 |
+| DJI 电机 | M3508 / C620 等 | CAN | `MyLib/motor.c` `motorEx.c` |
 
 ---
 
-## 📁 目录结构
+## 3. 目录结构
 
 ```
-exact_fire/
-├── Chassis/              # 核心框架层
-│   ├── AutoPilot.c/h     #   五次多项式轨迹规划器
-│   ├── ForceChassis.c/h  #   力控底盘解算器
-│   └── Action_Config.c/h #   动作配置（预留）
-├── lib/                  # 驱动与算法库
-│   ├── RMLibHead.h       #   跨平台适配层
-│   ├── PID.c/h           #   PID + 模糊PID + PI
-│   ├── PID_old.c/h       #   经典位置式PID (PID2)
-│   ├── CANDrive.c/h      #   CAN 底层收发
-│   ├── motor.c/h         #   DJI 电机数据解析
-│   ├── motorEx.c/h       #   DJI M3508 扩展 (串级PID)
-│   ├── VESC.c/h          #   VESC CAN 协议
-│   ├── RobStride2.c/h    #   RobStride 电机 CAN 协议
-│   ├── go_motor.c/h      #   Unitree GoMotor RS485 协议
-│   ├── 485_bus.c/h       #   RS485 总线抽象层
-│   ├── bsp_dwt.c/h       #   DWT 延时/计时
-│   ├── crc_ccitt.c/h     #   CRC-CCITT 校验
-│   ├── JY61.c/h          #   JY61 姿态传感器
-│   ├── Vector.h          #   Vector2D / Vector3D
-│   └── Chassis.h         #   底盘通用定义
-├── Mytask/
-│   ├── Task_Init.c/h     #   业务逻辑：遥控、击球、弹射
-│   └── config.h          #   机械/运动参数宏定义
-├── Remote_control/       #   自定义遥控通信协议栈
-│   ├── comm.c/h          #     协议栈核心
-│   ├── comm_stm32_hal_middle.c/h  # HAL 适配层
-│   ├── data_poll.c/h     #     数据轮询
-│   ├── dataFrame.h       #     数据帧定义
-│   ├── hardware.h        #     硬件抽象
-│   └── My_list.c/h       #     通用链表
-├── Matrix/               #   矩阵运算库
-│   ├── matrix.c/h        #     CMSIS-DSP 包装
-│   └── svd.c/h           #     SVD/QR 分解
-├── Core/                 #   STM32CubeMX 生成
-│   ├── Src/main.c        #     双 CAN + 四 UART 初始化
-│   └── Src/freertos.c    #     RTOS 入口
-├── MDK-ARM/              #   Keil MDK 工程 & step 库
-└── Middlewares/           #   FreeRTOS 源码
+Volley_ok/
+├── Core/            CubeMX 生成：CAN / UART / DMA / GPIO / FreeRTOS
+├── Mytask/          业务层：Task_Init.c（状态机与任务）、config.h（参数）
+├── MyLib/           驱动与算法：
+│   ├── CANDrive      CAN 底层收发
+│   ├── motor/motorEx DJI 电机解析与串级 PID
+│   ├── VESC          VESC 原生 CAN 协议
+│   ├── RobStride2    RobStride MIT 力位混合协议
+│   ├── go_motor      Unitree GoMotor RS485 协议
+│   ├── 485_bus       RS485 总线抽象
+│   ├── PID_old       位置式 PID
+│   ├── RMLibHead     跨平台适配层
+│   └── crc_ccitt / mylist / bsp_dwt
+├── Remote_control/  自定义遥控协议栈（命令-回调注册、ACK 重传、DMA 空闲中断分包）
+└── MDK-ARM/         Keil 工程 + step.c（三次多项式轨迹）
 ```
 
 ---
 
-## 🔧 硬件配置
+## 4. 核心实现
 
-| 参数 | 值 | 定义处 |
-|------|-----|--------|
-| 主控 | STM32F407VGTx, 168MHz | `main.c` |
-| RTOS | FreeRTOS 10.x, CMSIS-RTOS2 | `freertos.c` |
-| 全向轮半径 | 0.075 m | `config.h`: `WHEEL_RADIUS` |
-| 底盘轴距 (轮心到中心) | 0.457 m | `config.h`: `LENGTH` |
-| 减速比 | 19.2:1 | `config.h`: `GEAR_RATIO` |
-| 最大线速度 | 10 m/s | `config.h`: `MAX_ROBOT_VEL` |
-| 最大角速度 | 90°/s | `config.h`: `MAX_ROBOT_OMEGA` |
-| 弹射电机 | RobStride_02 (扭矩±60Nm) | `Task_Init.c` |
-| 扬臂电机 | DJI M3508 | `Task_Init.c` |
-| 弹射轨迹时间 | 0.18 s | `Task_Init.c` |
-| 球路数量 | 3 (远/中/近) | `Task_Init.c` |
-| IMU 传感器 | JY61 (UART6, 115200bps) | `JY61.c` |
-| IMU 更新频率 | 500 Hz | `Task_Init.c`: `Remote_Jy61` |
-| 陀螺仪量程 | ±2000°/s | `JY61.c` |
-| 滑移检测阈值 | 0.50°/s | `Task_Init.h`: `SLIP_THRESHOLD` |
-| 校正输出限幅 | ±4.0°/s | `Task_Init.h`: `CORR_OUT_MAX` |
-| PID 频率 | 500 Hz | `Task_Init.c` |
+### 4.1 三类电机统一接口
 
----
+底盘（VESC）、弹射（RobStride）、击球（GoMotor）的协议完全不同：
 
-## 🚀 快速开始
+- **VESC**：`ExtId = (packet << 8) | motor_id`，设定电流/占空比/RPM/位置，反馈帧带转速、电流、温度；
+- **RobStride**：扭矩编码进扩展帧 ID `(0x1 << 24) | (torque << 8) | motor_id`，数据区放位置/速度/Kp/Kd，实现 MIT 力位混合；**上电必须先发使能帧**，否则电机不响应；
+- **GoMotor**：RS485 帧，经 `485_bus.c` 抽象后由 `go_motor.c` 封装。
 
-1. 用 **Keil MDK** 或 **STM32CubeIDE** 打开项目
-2. 确认 Middlewares/FreeRTOS 和 Drivers/ 路径配置正确
-3. 根据实际机械尺寸修改 `Mytask/config.h` 中的参数
-4. 编译 → 烧录 → 上电
-5. 遥控器上电后，拨动右侧三段开关选择球路，光电门检测到球后自动执行弹射
+上层 `Task_Init.c` 只面对"目标位置/目标力"，不关心具体型号。
+
+### 4.2 状态机与多机构互斥
+
+挑球、弹射、击球是并发动作，用状态机而不是顺序 if-else，保证同一时刻只有一个动作在跑，出问题时也能明确定位停在哪一步。
+
+### 4.3 遥控协议栈
+
+`Remote_control/comm.c` 提供 `register_comm_recv_cb(callback, cmd, user_data)` 的命令-回调注册机制，收到匹配命令字自动分发；配合 `HAL_UARTEx_ReceiveToIdle_DMA` 处理变长数据包。
+
+### 4.4 串口错误恢复
+
+`HAL_UART_ErrorCallback` 中按参考手册顺序（先读 SR 再读 DR）清除 ORE/NE/FE/PE 标志后重挂 DMA——不清标志直接重挂会导致接收永久失效。
 
 ---
 
-## 📝 作者
+## 5. 个人职责
 
-- **底盘框架 (AutoPilot / ForceChassis)**：刘远钊
-- **RobStride / VESC / GoMotor 驱动**：刘家瑞
-- **应用层逻辑**：刘家瑞
-- **RMLib 基础库**：Yao (KDRobot)
+团队项目。本人负责：
+
+- **电机驱动层**：`RobStride2.c`、`VESC.c`、`go_motor.c`、`485_bus.c` 的协议实现与调试
+- **应用层逻辑**：`Task_Init.c` 中的动作状态机与多机构协同
+- 整机联调与参数整定
+
+> 底盘力控框架、轨迹规划与机械结构由团队其他成员完成，不在本仓库 claim 范围内。
 
 ---
 
-## ⚠️ 注意事项
+## 6. 快速开始
 
-- VESC 电调需提前用 VESC Tool 配置好 CAN 通信参数（ID、波特率等）
-- RobStride 电机上电后需先发送 `RobStrideEnable()` 使能
-- UART5 的 DMA 接收使用 `ReceiveToIdle` 模式，依赖 STM32 HAL 1.24+ 版本
-- `force_A_data` / `A_vel_data` 静态数组大小按最多 4 舵轮设计，扩展需同步修改 `ForceChassis.h`
-- JY61 上电后需稳定 150ms 再开始读取，`Remote_Jy61` 任务启动时已内置该延迟
-- 抓地力权重 (`WHEEL1/2/3_GRIP_RATIO`) 需根据实际场地摩擦力标定，默认值适用于标准竞赛地毯
-- 若场地极滑（如瓷砖），可将 `SLIP_THRESHOLD` 从 0.50 降低到 0.20，`CORR_OUT_MAX` 从 4.0 提高到 6.0
+1. Keil MDK 打开 `MDK-ARM/Volley_ok.uvprojx`（也可用 EIDE 配置，见 `MDK-ARM/.eide/`）
+2. 按实际机械尺寸核对 `Mytask/config.h` 中的参数
+3. 编译 → 烧录
+4. 遥控上电，先用低速档验证底盘与各机构动作方向
+
+---
+
+## 7. 已知限制
+
+- 无单元测试，验证依赖实机联调
+- 参数（PID、限幅、零位）与具体机械强相关，换车需重新标定
+- 本仓库为 2026 赛季版本；2027 赛季的重构在 `volley_2027`
+- 工程内保留了 CubeMX/Keil 生成的 `Drivers/`、`Middlewares/`，因此仓库体积较大
+
+---
+
+## 8. 注意事项
+
+- VESC 需先用 VESC Tool 配好 CAN ID 与波特率
+- RobStride 上电必须发使能帧
+- 变长遥控包依赖 `ReceiveToIdle`（HAL 1.24+）
+- 电气与气动相关 GPIO 映射需与实际接线一致，换车必须重新确认
